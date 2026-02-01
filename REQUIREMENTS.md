@@ -330,7 +330,7 @@ gantt
     Setup GitHub Actions         :a1, 2025-02-01, 2d
     Configure Roslyn             :a2, 2025-02-02, 1d
     Integrate Claude API         :a3, 2025-02-03, 2d
-    Basic PR comments            :a4, 2025-02-04, 1d
+    PR comments            :a4, 2025-02-04, 1d
     Testing                      :a5, 2025-02-05, 2d
     
     section Phase 2 - Enhancement
