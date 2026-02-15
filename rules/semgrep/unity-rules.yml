@@ -1,0 +1,137 @@
+rules:
+  - id: unity-find-in-update
+    patterns:
+      - pattern: |
+          void Update() { ... GameObject.Find(...); ... }
+      - pattern: |
+          void FixedUpdate() { ... GameObject.Find(...); ... }
+      - pattern: |
+          void LateUpdate() { ... GameObject.Find(...); ... }
+    message: >
+      GameObject.Find() called inside Update/FixedUpdate/LateUpdate.
+      This is extremely expensive every frame. Cache the reference in Awake() or Start().
+    severity: ERROR
+    languages: [csharp]
+    metadata:
+      category: performance
+      impact: HIGH
+
+  - id: unity-find-objects-in-update
+    patterns:
+      - pattern: |
+          void Update() { ... FindObjectsOfType(...); ... }
+      - pattern: |
+          void FixedUpdate() { ... FindObjectsOfType(...); ... }
+    message: >
+      FindObjectsOfType() in Update loop is extremely expensive.
+      Cache results in Awake()/Start() or use a registry pattern.
+    severity: ERROR
+    languages: [csharp]
+    metadata:
+      category: performance
+      impact: HIGH
+
+  - id: unity-instantiate-in-loop
+    pattern: |
+      for (...) { ... Instantiate($PREFAB); ... }
+    message: >
+      Instantiate() inside a loop creates garbage. Consider using an object pool pattern.
+    severity: WARNING
+    languages: [csharp]
+    metadata:
+      category: performance
+      impact: MEDIUM
+
+  - id: unity-api-from-thread-task
+    patterns:
+      - pattern: |
+          Task.Run(() => { ... $OBJ.transform.$PROP = ...; ... })
+      - pattern: |
+          Task.Run(() => { ... $OBJ.gameObject.$METHOD(...); ... })
+    message: >
+      Unity API accessed from a background thread via Task.Run().
+      Unity objects must only be accessed from the main thread.
+    severity: ERROR
+    languages: [csharp]
+    metadata:
+      category: threading
+      impact: HIGH
+
+  - id: unity-api-from-thread-new
+    patterns:
+      - pattern: |
+          new Thread(() => { ... $OBJ.transform.$PROP = ...; ... })
+    message: >
+      Unity API accessed from a background thread.
+      Unity objects must only be accessed from the main thread.
+    severity: ERROR
+    languages: [csharp]
+    metadata:
+      category: threading
+      impact: HIGH
+
+  - id: unity-getcomponent-in-update
+    patterns:
+      - pattern: |
+          void Update() { ... GetComponent<$TYPE>(); ... }
+      - pattern: |
+          void FixedUpdate() { ... GetComponent<$TYPE>(); ... }
+    message: >
+      GetComponent<T>() in Update/FixedUpdate is expensive.
+      Cache the component reference in Awake() or Start().
+    severity: WARNING
+    languages: [csharp]
+    metadata:
+      category: performance
+      impact: MEDIUM
+
+  - id: unity-tag-string-comparison
+    pattern: |
+      $X.tag == $TAG
+    message: >
+      Use CompareTag() instead of string comparison for tags.
+      CompareTag avoids garbage allocation from string comparison.
+    severity: WARNING
+    languages: [csharp]
+    metadata:
+      category: performance
+      impact: LOW
+
+  - id: unity-empty-update
+    pattern: |
+      void Update() { }
+    message: >
+      Empty Update() method still has overhead from Unity's messaging system.
+      Remove it if not needed.
+    severity: INFO
+    languages: [csharp]
+    metadata:
+      category: performance
+      impact: LOW
+
+  - id: unity-camera-main-in-update
+    patterns:
+      - pattern: |
+          void Update() { ... Camera.main.$PROP ... }
+      - pattern: |
+          void FixedUpdate() { ... Camera.main.$PROP ... }
+    message: >
+      Camera.main calls FindObjectWithTag internally each time.
+      Cache the camera reference in Start() or Awake().
+    severity: WARNING
+    languages: [csharp]
+    metadata:
+      category: performance
+      impact: MEDIUM
+
+  - id: unity-sendmessage-usage
+    pattern: |
+      SendMessage($MSG, ...)
+    message: >
+      SendMessage() uses reflection and is slow. Prefer direct method calls,
+      events, or interfaces instead.
+    severity: WARNING
+    languages: [csharp]
+    metadata:
+      category: performance
+      impact: MEDIUM

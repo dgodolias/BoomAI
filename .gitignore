@@ -1,1 +1,8 @@
 /questions.txt
+__pycache__/
+*.pyc
+.env
+.venv/
+*.egg-info/
+dist/
+build/
