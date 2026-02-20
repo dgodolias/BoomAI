@@ -150,3 +150,48 @@ def handle_command(comment_body: str):
         FixApplier().apply_batch(body)
     else:
         logger.info(f"Unknown /boomAI command: {body[:100]}")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="BoomAI Fix Applier CLI")
+    parser.add_argument("--repo", required=True, help="owner/repo")
+    parser.add_argument("--pr", required=True, type=int, help="PR number")
+    parser.add_argument("--apply-all", action="store_true", help="Apply all suggestions")
+    parser.add_argument("--apply-file", type=str, help="Apply suggestions for one file")
+    parser.add_argument("--list", action="store_true", dest="list_suggestions", help="List pending suggestions")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    settings.github_repository = args.repo
+    settings.pr_number = args.pr
+    if not settings.github_token:
+        import os
+        token = os.environ.get("BOOMAI_GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+        settings.github_token = token
+
+    if not settings.github_token:
+        print("Error: Set BOOMAI_GITHUB_TOKEN in .env or as env var")
+        raise SystemExit(1)
+
+    applier = FixApplier()
+
+    if args.list_suggestions:
+        suggestions = applier.get_pending_suggestions()
+        if not suggestions:
+            print("No pending suggestions.")
+        else:
+            print(f"\n{len(suggestions)} pending suggestion(s):\n")
+            for i, s in enumerate(suggestions, 1):
+                print(f"  #{i} {s['file']}:{s['line']}")
+                preview = s['suggestion'][:80].replace('\n', ' ')
+                print(f"      {preview}...")
+            print()
+    elif args.apply_all:
+        applier.apply_all()
+    elif args.apply_file:
+        applier.apply_file(args.apply_file)
+    else:
+        parser.print_help()

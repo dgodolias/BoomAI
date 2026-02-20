@@ -44,11 +44,12 @@ jobs:
 
       - name: Run BoomAI Review
         env:
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          BOOMAI_GOOGLE_API_KEY: ${{ secrets.BOOMAI_GOOGLE_API_KEY }}
+          BOOMAI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BOOMAI_GITHUB_REPOSITORY: ${{ github.repository }}
+          BOOMAI_PR_NUMBER: ${{ github.event.pull_request.number }}
+          BOOMAI_SLACK_WEBHOOK_URL: ${{ secrets.BOOMAI_SLACK_WEBHOOK_URL }}
+          BOOMAI_SLACK_ENABLED: "false"
         run: python -m scripts.main
 
   apply-fixes:
@@ -72,16 +73,12 @@ jobs:
 
       - name: Apply Fixes
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.issue.number }}
+          BOOMAI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BOOMAI_GITHUB_REPOSITORY: ${{ github.repository }}
+          BOOMAI_PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           python -c "
-          import os
           from scripts.config import settings
           from scripts.apply_fixes import handle_command
-          settings.pr_number = int(os.environ['PR_NUMBER'])
-          settings.github_token = os.environ['GITHUB_TOKEN']
-          settings.github_repository = os.environ['GITHUB_REPOSITORY']
           handle_command('''${{ github.event.comment.body }}''')
           "

@@ -118,12 +118,21 @@ def _truncate_diff(diff: str) -> str:
     )
 
 
+def _sanitize_json(text: str) -> str:
+    """Fix common Gemini JSON issues: trailing commas, truncated output."""
+    import re
+    # Remove trailing commas before } or ]
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+    return text
+
+
 def _parse_review_response(
     text: str, original_findings: list[Finding]
 ) -> ReviewSummary:
     """Parse Gemini's JSON response into a ReviewSummary."""
     try:
-        data = json.loads(text)
+        sanitized = _sanitize_json(text)
+        data = json.loads(sanitized)
         comments = []
         for f in data.get("findings", []):
             comments.append(
