@@ -5,8 +5,13 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - '**/*.cs'
-      - '**/*.unity'
-      - '**/*.prefab'
+      - '**/*.ts'
+      - '**/*.tsx'
+      - '**/*.js'
+      - '**/*.jsx'
+      - '**/*.py'
+      - '**/*.java'
+      - '**/*.go'
   issue_comment:
     types: [created]
 
@@ -31,15 +36,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Setup .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
       - name: Install Semgrep
         run: pip install semgrep
 
-      - name: Install Python dependencies
+      - name: Install BoomAI dependencies
         run: pip install -r requirements.txt
 
       - name: Run BoomAI Review
@@ -67,7 +67,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Python dependencies
+      - name: Install BoomAI dependencies
         run: pip install -r requirements.txt
 
       - name: Apply Fixes

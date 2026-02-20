@@ -8,9 +8,9 @@ import sys
 
 from scripts.config import settings
 from scripts.github_client import GitHubClient
+from scripts.languages import detect_languages, filter_reviewable_files
 from scripts.static_analysis import (
     run_semgrep,
-    run_dotnet_analysis,
     filter_to_changed_files,
     prioritize_findings,
 )
@@ -31,45 +31,44 @@ async def run_review():
     # 1. Initialize GitHub client
     gh = GitHubClient()
 
-    # 2. Get changed files
+    # 2. Get changed files and detect languages
     changed_files = gh.get_changed_files()
     filenames = [f["filename"] for f in changed_files]
-    cs_files = [f for f in filenames if f.endswith(".cs")]
+
+    detected_languages = detect_languages(filenames)
+    reviewable_files = filter_reviewable_files(filenames)
 
     logger.info(
         f"PR #{settings.pr_number}: {len(changed_files)} files changed, "
-        f"{len(cs_files)} C# files"
+        f"{len(reviewable_files)} reviewable, "
+        f"languages: {detected_languages or ['none']}"
     )
 
-    if not cs_files:
+    if not reviewable_files:
         gh.post_comment(
-            "**BoomAI:** No C# files changed in this PR. Skipping review."
+            "**BoomAI:** No supported source files changed. Skipping review."
         )
-        logger.info("No C# files to review, exiting")
+        logger.info("No reviewable files, exiting")
         return
 
-    # 3. Run static analysis
+    # 3. Run static analysis (language-aware)
     logger.info("Running static analysis...")
-    semgrep_findings = run_semgrep(cs_files)
-
-    # Roslyn: only if a .sln file exists in the repo
-    sln_files = [f for f in os.listdir(".") if f.endswith(".sln")]
-    roslyn_findings = run_dotnet_analysis(sln_files[0] if sln_files else None)
-    roslyn_findings = filter_to_changed_files(roslyn_findings, filenames)
-
-    all_findings = semgrep_findings + roslyn_findings
-    top_findings = prioritize_findings(all_findings, settings.max_findings)
+    semgrep_findings = run_semgrep(reviewable_files, detected_languages)
+    semgrep_findings = filter_to_changed_files(semgrep_findings, filenames)
+    top_findings = prioritize_findings(semgrep_findings, settings.max_findings)
 
     logger.info(
-        f"Static analysis: {len(all_findings)} total, "
+        f"Static analysis: {len(semgrep_findings)} total, "
         f"{len(top_findings)} selected for AI review"
     )
 
-    # 4. Get PR diff and run AI review
+    # 4. Get PR diff and run AI review (language-aware)
     diff = gh.get_diff()
     logger.info(f"Diff size: {len(diff)} chars")
 
-    review = await review_with_gemini(diff, top_findings, changed_files)
+    review = await review_with_gemini(
+        diff, top_findings, changed_files, detected_languages
+    )
     logger.info(
         f"AI review: {len(review.findings)} findings, "
         f"{review.critical_count} critical"
@@ -94,7 +93,6 @@ async def run_review():
 
 def main():
     """Entry point — parse GitHub event and run the review pipeline."""
-    # Parse PR number from GitHub Actions event
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     if event_path and os.path.exists(event_path):
         with open(event_path) as f:
@@ -105,7 +103,6 @@ def main():
         elif "issue" in event:
             settings.pr_number = event["issue"]["number"]
 
-    # Override from env if set directly
     if os.environ.get("PR_NUMBER"):
         settings.pr_number = int(os.environ["PR_NUMBER"])
 

@@ -7,7 +7,7 @@ import httpx
 
 from scripts.config import settings
 from scripts.models import Finding, ReviewComment, ReviewSummary, Severity
-from scripts.prompts import SYSTEM_PROMPT, REVIEW_USER_TEMPLATE
+from scripts.prompts import build_system_prompt, build_user_message
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +16,7 @@ async def review_with_gemini(
     diff: str,
     findings: list[Finding],
     changed_files: list[dict],
+    detected_languages: list[str] | None = None,
 ) -> ReviewSummary:
     """
     Send PR diff + static findings to Gemini for AI review.
@@ -23,16 +24,22 @@ async def review_with_gemini(
     URL pattern: {base_url}/{model}:generateContent?key={api_key}
     Same as DataViz llm_service.py.
     """
+    if detected_languages is None:
+        detected_languages = []
+
+    system_prompt = build_system_prompt(detected_languages)
+
     findings_json = json.dumps(
         [f.model_dump() for f in findings],
         indent=2,
         ensure_ascii=False,
     )
 
-    user_message = REVIEW_USER_TEMPLATE.format(
+    user_message = build_user_message(
         diff=_truncate_diff(diff),
         finding_count=len(findings),
         findings_json=findings_json,
+        detected_languages=detected_languages,
     )
 
     url = (
@@ -46,7 +53,7 @@ async def review_with_gemini(
                 url,
                 headers={"Content-Type": "application/json"},
                 json={
-                    "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+                    "system_instruction": {"parts": [{"text": system_prompt}]},
                     "contents": [
                         {"role": "user", "parts": [{"text": user_message}]}
                     ],

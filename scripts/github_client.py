@@ -48,7 +48,6 @@ class GitHubClient:
 
             comment_kwargs = {
                 "body": body,
-                "commit": commit,
                 "path": finding.file,
                 "line": finding.line,
             }
@@ -58,17 +57,28 @@ class GitHubClient:
 
             comments.append(comment_kwargs)
 
-        # Post all comments as a single atomic review
         review_body = f"## BoomAI Review\n\n{summary.summary}"
         if summary.has_critical:
             review_body += f"\n\n**{summary.critical_count} critical issue(s) found.**"
 
-        self.pr.create_review(
-            body=review_body,
-            event="COMMENT",
-            comments=comments,
-        )
-        logger.info(f"Posted review with {len(comments)} inline comment(s)")
+        try:
+            self.pr.create_review(
+                commit=commit,
+                body=review_body,
+                event="COMMENT",
+                comments=comments,
+            )
+            logger.info(f"Posted review with {len(comments)} inline comment(s)")
+        except Exception as e:
+            # Fallback: post as simple comment if inline review fails
+            logger.warning(f"Inline review failed ({e}), posting as comment")
+            comment_body = review_body + "\n\n---\n\n"
+            for finding in summary.findings:
+                comment_body += (
+                    f"**{finding.file}:{finding.line}**\n"
+                    f"{finding.body}\n\n"
+                )
+            self.pr.create_issue_comment(comment_body)
 
     def post_comment(self, body: str):
         """Post a standalone issue comment on the PR."""

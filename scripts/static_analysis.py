@@ -1,30 +1,47 @@
 import json
 import logging
-import re
 import subprocess
 from pathlib import Path
 
 from scripts.models import Finding, Severity, FindingSource
+from scripts.languages import LANGUAGES
 
 logger = logging.getLogger(__name__)
 
 
-def run_semgrep(changed_files: list[str]) -> list[Finding]:
-    """Run Semgrep with custom Unity rules on changed C# files."""
+def run_semgrep(
+    changed_files: list[str], detected_languages: list[str]
+) -> list[Finding]:
+    """Run Semgrep with appropriate rulesets based on detected languages."""
+    if not changed_files:
+        logger.info("No reviewable files, skipping Semgrep")
+        return []
+
     rules_dir = Path(__file__).parent.parent / "rules" / "semgrep"
 
-    cs_files = [f for f in changed_files if f.endswith(".cs")]
-    if not cs_files:
-        logger.info("No C# files changed, skipping Semgrep")
+    # Build --config flags dynamically from detected languages
+    config_args = []
+    for lang_key in detected_languages:
+        config = LANGUAGES.get(lang_key)
+        if not config:
+            continue
+        for ruleset in config.semgrep_rulesets:
+            config_args.extend(["--config", ruleset])
+        if config.custom_rules_file:
+            custom_path = rules_dir / config.custom_rules_file
+            if custom_path.exists():
+                config_args.extend(["--config", str(custom_path)])
+
+    if not config_args:
+        logger.info("No Semgrep rulesets for detected languages, skipping")
         return []
 
     cmd = [
         "semgrep",
-        "--config", str(rules_dir),
-        "--config", "p/csharp",
+        *config_args,
         "--json",
         "--no-git-ignore",
-    ] + cs_files
+    ] + changed_files
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -57,44 +74,6 @@ def run_semgrep(changed_files: list[str]) -> list[Finding]:
         return []
     except Exception as e:
         logger.error(f"Semgrep failed: {e}")
-        return []
-
-
-def run_dotnet_analysis(solution_path: str | None = None) -> list[Finding]:
-    """Run dotnet build with analyzers and parse MSBuild warnings/errors."""
-    if not solution_path:
-        logger.info("No .sln file found, skipping Roslyn analysis")
-        return []
-
-    cmd = [
-        "dotnet", "build", solution_path,
-        "--no-restore",
-        "/p:TreatWarningsAsErrors=false",
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        findings = []
-        pattern = r"(.+?)\((\d+),\d+\): (warning|error) (\w+): (.+)"
-        for line in result.stdout.splitlines() + result.stderr.splitlines():
-            m = re.match(pattern, line)
-            if m:
-                findings.append(Finding(
-                    file=m.group(1).strip(),
-                    line=int(m.group(2)),
-                    severity=Severity.HIGH if m.group(3) == "error" else Severity.MEDIUM,
-                    source=FindingSource.ROSLYN,
-                    rule_id=m.group(4),
-                    message=m.group(5).strip(),
-                ))
-        logger.info(f"Roslyn found {len(findings)} issue(s)")
-        return findings
-
-    except subprocess.TimeoutExpired:
-        logger.error("Roslyn analysis timed out")
-        return []
-    except Exception as e:
-        logger.error(f"Roslyn analysis failed: {e}")
         return []
 
 
