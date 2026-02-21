@@ -1,0 +1,84 @@
+name: BoomAI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**/*.cs'
+      - '**/*.ts'
+      - '**/*.tsx'
+      - '**/*.js'
+      - '**/*.jsx'
+      - '**/*.py'
+      - '**/*.java'
+      - '**/*.go'
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Install BoomAI dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run BoomAI Review
+        env:
+          BOOMAI_GOOGLE_API_KEY: ${{ secrets.BOOMAI_GOOGLE_API_KEY }}
+          BOOMAI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BOOMAI_GITHUB_REPOSITORY: ${{ github.repository }}
+          BOOMAI_PR_NUMBER: ${{ github.event.pull_request.number }}
+          BOOMAI_SLACK_WEBHOOK_URL: ${{ secrets.BOOMAI_SLACK_WEBHOOK_URL }}
+          BOOMAI_SLACK_ENABLED: "false"
+        run: python -m scripts.main
+
+  apply-fixes:
+    if: >
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/boomAI')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install BoomAI dependencies
+        run: pip install -r requirements.txt
+
+      - name: Apply Fixes
+        env:
+          BOOMAI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BOOMAI_GITHUB_REPOSITORY: ${{ github.repository }}
+          BOOMAI_PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python -c "
+          from scripts.config import settings
+          from scripts.apply_fixes import handle_command
+          handle_command('''${{ github.event.comment.body }}''')
+          "
