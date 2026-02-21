@@ -1,0 +1,16 @@
+name: Rust
+extensions: [.rs]
+semgrep_rulesets: [p/rust]
+expertise: >
+  Memory safety and ownership model. Borrow checker correctness.
+  Async Tokio patterns. Error propagation with ? operator.
+  Safe vs unsafe code boundaries.
+prompt_extras:
+  - "Ownership and borrow checker violations"
+  - "Unsafe blocks without safety comments explaining invariants"
+  - "Panic in production paths (unwrap/expect without justification)"
+  - "Missing error propagation (? operator vs silent discard)"
+  - "Tokio async anti-patterns (blocking calls inside async tasks)"
+  - "Arc<Mutex<T>> deadlock potential"
+  - "Integer overflow in arithmetic (debug vs release mode behavior)"
+  - "Lifetime annotation issues causing hidden copies"

@@ -4,24 +4,12 @@ from boomai.languages import LANGUAGES
 
 
 def _build_language_extras(lang_configs: list) -> list[str]:
-    """Build language-specific review focus bullets (shared by review + scan)."""
+    """Build language-specific review focus bullets from each skill's prompt_extras."""
     extra = []
     for config in lang_configs:
-        if config.name == "C#/Unity":
-            extra.append("   - Unity performance anti-patterns")
-            extra.append("   - Memory allocation in hot paths")
-            extra.append("   - Threading safety issues")
-        elif config.name == "TypeScript":
-            extra.append("   - Type safety gaps and `any` casts")
-            extra.append("   - React rendering performance issues")
-            extra.append("   - Unhandled promise rejections")
-        elif config.name == "JavaScript":
-            extra.append("   - Prototype and closure pitfalls")
-            extra.append("   - Unhandled async errors")
-        elif config.name == "Python":
-            extra.append("   - Type hint correctness")
-            extra.append("   - Resource leaks (unclosed files, connections)")
-            extra.append("   - Security issues (injection, unsafe deserialization)")
+        if config.prompt_extras:
+            for bullet in config.prompt_extras:
+                extra.append(f"   - {bullet}")
         else:
             extra.append(f"   - {config.name}-specific best practice violations")
     extra.append("   - Merge conflict artifacts and duplicate definitions")
@@ -62,6 +50,32 @@ def build_system_prompt(detected_languages: list[str]) -> str:
                 parts.append(f"- {config.expertise}")
 
     parts.extend([
+        "",
+        "## Security Patterns (check each explicitly)",
+        "### Input Handling",
+        "- Path traversal: is input decoded BEFORE validation? (`%2e%2e` → `..` bypasses check)",
+        "- Is MIME type from client trusted without server-side magic-byte check?",
+        "- Are file paths normalized and verified to stay within a base directory?",
+        "- Is there a whitelist regex instead of a blacklist for input validation?",
+        "",
+        "### Authentication & Authorization",
+        "- Does auth return early for unknown user? (timing attack → username enumeration)",
+        "- Are there plaintext password comparisons or legacy plaintext fallbacks?",
+        "- Is the same authz check applied consistently across ALL routes for a given resource?",
+        "- Do auth hooks/middleware early-return after sending 401, or does the route handler still execute?",
+        "- Mixed auth patterns in same codebase (session vs JWT vs localStorage)?",
+        "",
+        "### Async & Concurrency",
+        "- Is `readFileSync`/`writeFileSync`/`execSync` used inside async functions?",
+        "- Does read-modify-write lack a transaction or lock? (race condition)",
+        "- Is `Promise.all()` used for bulk operations? (should be `Promise.allSettled()` with partial failure handling)",
+        "- Are there missing `await` on async calls?",
+        "",
+        "### API & Configuration",
+        "- Does rate limiting have `skipOnError: true`? (errors bypass protection)",
+        "- Is CORS configured with unvalidated env var origins?",
+        "- Are list endpoints missing pagination? (memory exhaustion at scale)",
+        "- Is error response format consistent across all routes? (`{ error }` vs `{ message }` vs `{ errors: [] }`)",
         "",
         "## Output Format",
         "You MUST respond with valid JSON in this exact structure:",
@@ -167,6 +181,32 @@ def build_scan_system_prompt(detected_languages: list[str]) -> str:
         "- Concurrency and thread safety issues",
         "- Resource management (unclosed handles, missing cleanup)",
         "- Merge conflict artifacts and duplicate function/class definitions",
+        "",
+        "## Security Patterns (check each explicitly)",
+        "### Input Handling",
+        "- Path traversal: is input decoded BEFORE validation? (`%2e%2e` → `..` bypasses check)",
+        "- Is MIME type from client trusted without server-side magic-byte check?",
+        "- Are file paths normalized and verified to stay within a base directory?",
+        "- Is there a whitelist regex instead of a blacklist for input validation?",
+        "",
+        "### Authentication & Authorization",
+        "- Does auth return early for unknown user? (timing attack → username enumeration)",
+        "- Are there plaintext password comparisons or legacy plaintext fallbacks?",
+        "- Is the same authz check applied consistently across ALL routes for a given resource?",
+        "- Do auth hooks/middleware early-return after sending 401, or does the route handler still execute?",
+        "- Mixed auth patterns in same codebase (session vs JWT vs localStorage)?",
+        "",
+        "### Async & Concurrency",
+        "- Is `readFileSync`/`writeFileSync`/`execSync` used inside async functions?",
+        "- Does read-modify-write lack a transaction or lock? (race condition)",
+        "- Is `Promise.all()` used for bulk operations? (should be `Promise.allSettled()` with partial failure handling)",
+        "- Are there missing `await` on async calls?",
+        "",
+        "### API & Configuration",
+        "- Does rate limiting have `skipOnError: true`? (errors bypass protection)",
+        "- Is CORS configured with unvalidated env var origins?",
+        "- Are list endpoints missing pagination? (memory exhaustion at scale)",
+        "- Is error response format consistent across all routes? (`{ error }` vs `{ message }` vs `{ errors: [] }`)",
     ]
 
     if lang_configs:

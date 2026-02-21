@@ -1,0 +1,15 @@
+name: GDScript
+extensions: [.gd]
+semgrep_rulesets: []
+expertise: >
+  Godot 4 GDScript patterns. Node lifecycle (_ready, _process, _physics_process).
+  Signal/observer patterns. Scene tree management. Resource loading.
+prompt_extras:
+  - "_process() doing heavy work every frame (move to _physics_process or throttle)"
+  - "Missing null checks before calling methods on nodes that may not exist"
+  - "get_node() with hardcoded paths (use @onready var or exported NodePath)"
+  - "Signal connections never disconnected (memory leak in dynamic scenes)"
+  - "preload() vs load() misuse (preload is compile-time, load is runtime)"
+  - "Mutable exported arrays/dicts shared across instances (class-level state bug)"
+  - "yield/await on signals that may never fire (infinite hang)"
+  - "autoload (singleton) overuse creating hidden global state"

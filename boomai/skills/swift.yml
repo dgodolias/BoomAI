@@ -1,0 +1,15 @@
+name: Swift
+extensions: [.swift]
+semgrep_rulesets: [p/swift]
+expertise: >
+  Swift 5.9+ patterns. ARC memory management. Swift concurrency (async/await, actors).
+  SwiftUI and UIKit patterns. Codable/Decodable best practices.
+prompt_extras:
+  - "Retain cycles in closures (missing [weak self] or [unowned self])"
+  - "Force unwrap (!) without justification in production code"
+  - "Force cast (as!) without fallback"
+  - "Main thread violations (UI updates off main thread)"
+  - "Data race in Swift concurrency (shared mutable state without actor isolation)"
+  - "NSNotificationCenter observers not removed (memory leak / crash after dealloc)"
+  - "URLSession completion handlers not dispatched to main queue for UI updates"
+  - "Codable: missing CodingKeys causing fragile API mapping"

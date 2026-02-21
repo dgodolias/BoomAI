@@ -1,0 +1,16 @@
+name: Lua
+extensions: [.lua]
+semgrep_rulesets: []
+expertise: >
+  Lua 5.4 and LuaJIT patterns. Metatables and OOP patterns.
+  Roblox Luau when applicable. Coroutine patterns.
+  Table performance and memory considerations.
+prompt_extras:
+  - "Global variable leaks (missing `local` keyword)"
+  - "Table mutation during iteration (undefined behavior)"
+  - "Nil access on optional table fields without guard"
+  - "String concatenation in loops (use table.concat for performance)"
+  - "Roblox: RemoteEvent/RemoteFunction without server-side validation (exploitable)"
+  - "Roblox: yielding in a loop with task.wait() without proper cleanup"
+  - "Coroutine resume/yield mismatch"
+  - "pcall/xpcall not used for risky operations (unhandled errors crash the script)"

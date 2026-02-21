@@ -1,0 +1,18 @@
+name: C++
+extensions: [.cpp, .cc, .cxx, .h, .hpp, .hxx]
+semgrep_rulesets: [p/cpp]
+expertise: >
+  Modern C++17/20 patterns. Memory management (RAII, smart pointers).
+  Undefined behavior detection. STL usage. Template metaprogramming.
+  Unreal Engine (UE5) patterns when applicable.
+prompt_extras:
+  - "Raw pointer ownership ambiguity (prefer unique_ptr/shared_ptr)"
+  - "Use-after-free and dangling pointer dereferences"
+  - "Uninitialized variable reads (undefined behavior)"
+  - "Buffer overflows and out-of-bounds array access"
+  - "Missing virtual destructor in polymorphic base classes"
+  - "Integer overflow in signed arithmetic (undefined behavior)"
+  - "std::string vs std::string_view misuse (unnecessary copies)"
+  - "Thread safety: shared mutable state without synchronization"
+  - "Unreal: raw UObject pointers without UPROPERTY (GC risk)"
+  - "Unreal: Tick() doing expensive work every frame"

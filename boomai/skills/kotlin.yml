@@ -1,0 +1,16 @@
+name: Kotlin
+extensions: [.kt, .kts]
+semgrep_rulesets: [p/kotlin]
+expertise: >
+  Kotlin idioms and coroutines. Android development patterns.
+  Null safety system. Coroutine scope management.
+  Jetpack Compose when applicable.
+prompt_extras:
+  - "!! operator (non-null assertion) without justification"
+  - "Coroutine launched in GlobalScope (leaked, use structured concurrency)"
+  - "Blocking calls inside coroutines (runBlocking on main thread)"
+  - "Missing coroutine exception handler (unhandled exceptions crash the app)"
+  - "Android: network calls on main thread"
+  - "Android: Activity/Fragment context leaks in long-lived objects"
+  - "Mutable shared state in coroutines without Mutex or StateFlow"
+  - "lateinit var used without isInitialized check (UninitializedPropertyAccessException)"
