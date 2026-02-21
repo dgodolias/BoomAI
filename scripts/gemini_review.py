@@ -106,16 +106,48 @@ async def review_with_gemini(
 
 
 def _truncate_diff(diff: str) -> str:
-    """Truncate diff if it exceeds the max char limit."""
+    """Truncate diff at file boundaries if it exceeds the max char limit."""
     if len(diff) <= settings.max_diff_chars:
         return diff
+
     logger.warning(
         f"Diff too large ({len(diff)} chars), truncating to {settings.max_diff_chars}"
     )
-    return (
-        diff[: settings.max_diff_chars]
-        + "\n\n... [DIFF TRUNCATED - showing first portion only]"
-    )
+
+    # Split into per-file diffs and keep whole files until budget runs out
+    file_diffs = _split_diff_by_file(diff)
+    kept = []
+    total = 0
+    skipped = []
+    for filename, file_diff in file_diffs:
+        if total + len(file_diff) > settings.max_diff_chars and kept:
+            skipped.append(filename)
+            continue
+        kept.append(file_diff)
+        total += len(file_diff)
+
+    result = "".join(kept)
+    if skipped:
+        result += (
+            f"\n\n... [DIFF TRUNCATED — {len(skipped)} file(s) omitted: "
+            f"{', '.join(skipped[:10])}"
+            f"{'...' if len(skipped) > 10 else ''}]"
+        )
+    return result
+
+
+def _split_diff_by_file(diff: str) -> list[tuple[str, str]]:
+    """Split a unified diff into (filename, diff_chunk) pairs."""
+    import re
+    parts = re.split(r'(?=^diff --git )', diff, flags=re.MULTILINE)
+    result = []
+    for part in parts:
+        if not part.strip():
+            continue
+        match = re.search(r'^diff --git a/(.+?) b/', part, re.MULTILINE)
+        filename = match.group(1) if match else "unknown"
+        result.append((filename, part))
+    return result
 
 
 def _sanitize_json(text: str) -> str:

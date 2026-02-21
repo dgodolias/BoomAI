@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # Review settings
     max_findings: int = 20
-    max_diff_chars: int = 100_000
+    max_diff_chars: int = 250_000
 
     model_config = {
         "env_file": ".env",
