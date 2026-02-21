@@ -1,5 +1,6 @@
 """Gemini AI review integration — same httpx pattern as DataViz."""
 
+import asyncio
 import json
 import logging
 
@@ -13,6 +14,28 @@ from boomai.prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _gemini_post(url: str, payload: dict, timeout: float,
+                       max_retries: int = 3) -> httpx.Response | None:
+    """POST to Gemini API with retry on transient network errors."""
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                return await client.post(
+                    url,
+                    headers={"Content-Type": "application/json"},
+                    json=payload,
+                )
+        except (httpx.ConnectError, httpx.TimeoutException) as e:
+            if attempt < max_retries - 1:
+                wait = 2 ** (attempt + 1)
+                logger.warning(f"Gemini API attempt {attempt + 1} failed ({e}), retrying in {wait}s...")
+                await asyncio.sleep(wait)
+            else:
+                logger.error(f"Gemini API failed after {max_retries} attempts: {e}")
+                return None
+    return None
 
 
 async def review_with_gemini(
@@ -50,62 +73,40 @@ async def review_with_gemini(
         f":generateContent?key={settings.google_api_key}"
     )
 
-    try:
-        async with httpx.AsyncClient(timeout=settings.llm_timeout) as client:
-            response = await client.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json={
-                    "system_instruction": {"parts": [{"text": system_prompt}]},
-                    "contents": [
-                        {"role": "user", "parts": [{"text": user_message}]}
-                    ],
-                    "generationConfig": {
-                        "maxOutputTokens": settings.max_output_tokens,
-                        "temperature": 0.1,
-                        "responseMimeType": "application/json",
-                    },
-                },
-            )
+    response = await _gemini_post(url, {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_message}]}],
+        "generationConfig": {
+            "maxOutputTokens": settings.max_output_tokens,
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+        },
+    }, timeout=settings.llm_timeout)
 
-            if response.status_code != 200:
-                logger.error(
-                    f"Gemini API error {response.status_code}: {response.text[:500]}"
-                )
-                return _fallback_review(findings)
-
-            result = response.json()
-
-            # Error check (DataViz pattern)
-            if "error" in result:
-                error_msg = result["error"].get("message", "Unknown error")
-                logger.error(f"Gemini API error: {error_msg}")
-                return _fallback_review(findings)
-
-            # Validate response structure
-            if "candidates" not in result or not result["candidates"]:
-                logger.error(
-                    f"Malformed Gemini response: {json.dumps(result)[:500]}"
-                )
-                return _fallback_review(findings)
-
-            candidate = result["candidates"][0]
-            if "content" not in candidate or "parts" not in candidate["content"]:
-                logger.error(
-                    f"Malformed candidate: {json.dumps(candidate)[:500]}"
-                )
-                return _fallback_review(findings)
-
-            # Extract text (DataViz pattern)
-            text = candidate["content"]["parts"][0]["text"]
-            return _parse_review_response(text, findings)
-
-    except httpx.TimeoutException:
-        logger.error("Gemini API timed out")
+    if response is None:
         return _fallback_review(findings)
-    except Exception as e:
-        logger.exception(f"Gemini review failed: {e}")
+
+    if response.status_code != 200:
+        logger.error(f"Gemini API error {response.status_code}: {response.text[:500]}")
         return _fallback_review(findings)
+
+    result = response.json()
+
+    if "error" in result:
+        logger.error(f"Gemini API error: {result['error'].get('message', 'Unknown')}")
+        return _fallback_review(findings)
+
+    if "candidates" not in result or not result["candidates"]:
+        logger.error(f"Malformed Gemini response: {json.dumps(result)[:500]}")
+        return _fallback_review(findings)
+
+    candidate = result["candidates"][0]
+    if "content" not in candidate or "parts" not in candidate["content"]:
+        logger.error(f"Malformed candidate: {json.dumps(candidate)[:500]}")
+        return _fallback_review(findings)
+
+    text = candidate["content"]["parts"][0]["text"]
+    return _parse_review_response(text, findings)
 
 
 def _truncate_diff(diff: str) -> str:
@@ -257,54 +258,40 @@ async def _scan_chunk(
         f":generateContent?key={settings.google_api_key}"
     )
 
-    try:
-        async with httpx.AsyncClient(timeout=settings.scan_timeout) as client:
-            response = await client.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json={
-                    "system_instruction": {"parts": [{"text": system_prompt}]},
-                    "contents": [
-                        {"role": "user", "parts": [{"text": user_message}]}
-                    ],
-                    "generationConfig": {
-                        "maxOutputTokens": settings.scan_output_tokens,
-                        "temperature": 0.1,
-                        "responseMimeType": "application/json",
-                    },
-                },
-            )
+    response = await _gemini_post(url, {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_message}]}],
+        "generationConfig": {
+            "maxOutputTokens": settings.scan_output_tokens,
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+        },
+    }, timeout=settings.scan_timeout)
 
-            if response.status_code != 200:
-                logger.error(
-                    f"Gemini API error {response.status_code}: {response.text[:500]}"
-                )
-                return _fallback_review(chunk_findings)
-
-            result = response.json()
-
-            if "error" in result:
-                logger.error(f"Gemini API error: {result['error'].get('message', 'Unknown')}")
-                return _fallback_review(chunk_findings)
-
-            if "candidates" not in result or not result["candidates"]:
-                logger.error(f"Malformed Gemini response: {json.dumps(result)[:500]}")
-                return _fallback_review(chunk_findings)
-
-            candidate = result["candidates"][0]
-            if "content" not in candidate or "parts" not in candidate["content"]:
-                logger.error(f"Malformed candidate: {json.dumps(candidate)[:500]}")
-                return _fallback_review(chunk_findings)
-
-            text = candidate["content"]["parts"][0]["text"]
-            return _parse_review_response(text, chunk_findings)
-
-    except httpx.TimeoutException:
-        logger.error("Gemini API timed out")
+    if response is None:
         return _fallback_review(chunk_findings)
-    except Exception as e:
-        logger.exception(f"Gemini scan failed: {e}")
+
+    if response.status_code != 200:
+        logger.error(f"Gemini API error {response.status_code}: {response.text[:500]}")
         return _fallback_review(chunk_findings)
+
+    result = response.json()
+
+    if "error" in result:
+        logger.error(f"Gemini API error: {result['error'].get('message', 'Unknown')}")
+        return _fallback_review(chunk_findings)
+
+    if "candidates" not in result or not result["candidates"]:
+        logger.error(f"Malformed Gemini response: {json.dumps(result)[:500]}")
+        return _fallback_review(chunk_findings)
+
+    candidate = result["candidates"][0]
+    if "content" not in candidate or "parts" not in candidate["content"]:
+        logger.error(f"Malformed candidate: {json.dumps(candidate)[:500]}")
+        return _fallback_review(chunk_findings)
+
+    text = candidate["content"]["parts"][0]["text"]
+    return _parse_review_response(text, chunk_findings)
 
 
 async def scan_with_gemini(

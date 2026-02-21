@@ -24,6 +24,7 @@ def _build_language_extras(lang_configs: list) -> list[str]:
             extra.append("   - Security issues (injection, unsafe deserialization)")
         else:
             extra.append(f"   - {config.name}-specific best practice violations")
+    extra.append("   - Merge conflict artifacts and duplicate definitions")
     extra.append("   - Architecture/design concerns")
     return extra
 
@@ -88,8 +89,9 @@ def build_system_prompt(detected_languages: list[str]) -> str:
         "- suggestion: the EXACT replacement code that should replace old_code",
         "- Both old_code and suggestion must be valid, syntactically correct code",
         "- NEVER put natural language instructions in old_code or suggestion",
-        "- Keep fixes SMALL and SURGICAL — fix ONE thing at a time (max ~10 lines)",
-        "- If a fix requires large-scale restructuring, describe it in `message` and OMIT old_code/suggestion",
+        "- Keep fixes SMALL and SURGICAL — fix ONE thing at a time (max ~30 lines)",
+        '- To DELETE dead/duplicate code, provide old_code and set suggestion to an empty string ("")',
+        "- If a fix requires very large restructuring (more than ~30 lines), describe it in `message` and OMIT old_code/suggestion",
         "- If you cannot provide an exact fix, omit both old_code and suggestion",
         "",
         "- Keep findings focused and actionable (max 15 per review)",
@@ -164,6 +166,7 @@ def build_scan_system_prompt(detected_languages: list[str]) -> str:
         "- Missing input validation and boundary checks",
         "- Concurrency and thread safety issues",
         "- Resource management (unclosed handles, missing cleanup)",
+        "- Merge conflict artifacts and duplicate function/class definitions",
     ]
 
     if lang_configs:
@@ -202,8 +205,9 @@ def build_scan_system_prompt(detected_languages: list[str]) -> str:
         "- suggestion: the EXACT replacement code that should replace old_code",
         "- Both old_code and suggestion must be valid, syntactically correct code",
         "- NEVER put natural language instructions in old_code or suggestion",
-        "- Keep fixes SMALL and SURGICAL — fix ONE thing at a time (max ~10 lines)",
-        "- If a fix requires large-scale restructuring, describe it in `message` and OMIT old_code/suggestion",
+        "- Keep fixes SMALL and SURGICAL — fix ONE thing at a time (max ~30 lines)",
+        '- To DELETE dead/duplicate code, provide old_code and set suggestion to an empty string ("")',
+        "- If a fix requires very large restructuring (more than ~30 lines), describe it in `message` and OMIT old_code/suggestion",
         "- If you cannot provide an exact fix, omit both old_code and suggestion",
         "",
         "- Keep findings focused and actionable (max 20 per chunk)",

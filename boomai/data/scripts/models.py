@@ -33,6 +33,7 @@ class ReviewComment(BaseModel):
     end_line: int | None = None
     body: str
     suggestion: str | None = None
+    old_code: str | None = None
 
 
 class ReviewSummary(BaseModel):

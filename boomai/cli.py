@@ -140,8 +140,8 @@ def _find_and_replace(content: str, old_code: str, new_code: str,
     old_code = old_code.replace('\r\n', '\n')
     new_code = new_code.replace('\r\n', '\n')
 
-    # 1. Exact match — fastest path
-    if old_code in content:
+    # 1. Exact match — fastest path (skip if duplicates, use line-match for precision)
+    if old_code in content and content.count(old_code) == 1:
         return content.replace(old_code, new_code, 1), True
 
     # 2. Line-by-line match with trailing whitespace tolerance
@@ -149,7 +149,8 @@ def _find_and_replace(content: str, old_code: str, new_code: str,
     if match:
         start_idx, n = match
         lines = content.split('\n')
-        lines[start_idx:start_idx + n] = new_code.split('\n')
+        replacement = new_code.split('\n') if new_code else []
+        lines[start_idx:start_idx + n] = replacement
         return '\n'.join(lines), True
 
     return content, False
@@ -159,9 +160,14 @@ def apply_local(findings: list, repo_path: str = ".", file_filter: str | None = 
     """Apply suggestion fixes to local files using text search-and-replace."""
     by_file: dict[str, list] = {}
     for f in findings:
-        if not f.suggestion or not f.old_code:
+        if f.suggestion is None or not f.old_code:
             continue
-        if _is_natural_language(f.suggestion) or _is_natural_language(f.old_code):
+        if f.suggestion and _is_natural_language(f.suggestion):
+            continue
+        if _is_natural_language(f.old_code):
+            continue
+        # Safety: limit deletion-only operations to 50 lines
+        if not f.suggestion and len(f.old_code.strip().splitlines()) > 50:
             continue
         if file_filter and f.file != file_filter:
             continue

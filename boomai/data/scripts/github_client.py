@@ -43,7 +43,7 @@ class GitHubClient:
         comments = []
         for finding in summary.findings:
             body = finding.body
-            if finding.suggestion:
+            if finding.suggestion is not None:
                 body += f"\n\n```suggestion\n{finding.suggestion}\n```"
 
             comment_kwargs = {
