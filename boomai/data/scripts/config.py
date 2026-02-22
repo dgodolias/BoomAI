@@ -6,8 +6,8 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     llm_model: str = "gemini-3.1-pro-preview-customtools"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/models"
-    max_output_tokens: int = 16384
-    llm_timeout: float = 120.0
+    max_output_tokens: int = 32768
+    llm_timeout: float = 300.0
 
     # GitHub
     github_token: str = ""

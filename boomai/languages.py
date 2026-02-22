@@ -58,6 +58,10 @@ LANGUAGES: dict[str, LanguageConfig] = {
             "Pooled promise cancellation-path resource leak: `GetResult` skips `TryReturn()` when `cancelImmediately && token.IsCancellationRequested`, leaving the `CancellationTokenRegistration` undisposed and the object permanently leaked from the pool — always dispose registrations and return to pool in ALL exit paths, not just the success path",
             "CancellationTokenSource wrapped in a disposable that calls `Cancel()` but never `Dispose()` — `CancellationTokenSource` holds internal kernel handles on some runtimes; wrappers must call both `cts.Cancel()` and `cts.Dispose()` on cleanup to avoid native resource leaks",
             "Sequential `DisposeAsync` loop over multiple `IAsyncDisposable` items without per-item try-finally — if one `DisposeAsync()` throws, remaining items are never disposed and rented buffers (ArrayPool) are never returned; wrap each disposal in its own try-catch or aggregate exceptions",
+            "Unchecked integer arithmetic on network/file-provided size values before cast or allocation — attacker-controlled count can overflow or wrap, causing massive allocation (OOM) or negative index (buffer corruption); always validate against a reasonable maximum before using the value",
+            "Buffer/array capacity growth (e.g. `Math.Max(needed, buffer.Length * 2)`) without an explicit maximum cap — a single large message or malformed input triggers unbounded allocation that exhausts process memory",
+            "Unbounded delta/change-tracking collection (`List<Change>`) that grows until an explicit `Clear()` call — if the clear is skipped (error path, timing issue, disabled component), the list balloons indefinitely causing GC pressure and memory leaks",
+            "Serialization contract violation handled with soft warning instead of hard failure: `OnDeserialize` size mismatch logs a warning but continues execution — all subsequent fields/components deserialize from the wrong stream offset, producing silent data corruption",
         ],
     ),
 }

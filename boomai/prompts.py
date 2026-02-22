@@ -17,6 +17,36 @@ def _build_language_extras(lang_configs: list) -> list[str]:
     return extra
 
 
+_SECURITY_PATTERNS = [
+    "",
+    "## Security Patterns (check each explicitly)",
+    "### Input Handling",
+    "- Path traversal: is input decoded BEFORE validation? (`%2e%2e` → `..` bypasses check)",
+    "- Is MIME type from client trusted without server-side magic-byte check?",
+    "- Are file paths normalized and verified to stay within a base directory?",
+    "- Is there a whitelist regex instead of a blacklist for input validation?",
+    "",
+    "### Authentication & Authorization",
+    "- Does auth return early for unknown user? (timing attack → username enumeration)",
+    "- Are there plaintext password comparisons or legacy plaintext fallbacks?",
+    "- Is the same authz check applied consistently across ALL routes for a given resource?",
+    "- Do auth hooks/middleware early-return after sending 401, or does the route handler still execute?",
+    "- Mixed auth patterns in same codebase (session vs JWT vs localStorage)?",
+    "",
+    "### Async & Concurrency",
+    "- Is synchronous I/O (File.ReadAllText, WebClient, HttpWebRequest) used inside async methods? Should use async equivalents (File.ReadAllTextAsync, HttpClient)",
+    "- Does read-modify-write lack a transaction or lock? (race condition)",
+    "- Is Task.WhenAll() used for bulk operations without per-task exception handling? (one failed task causes WhenAll to throw, silently dropping successful results)",
+    "- Are there fire-and-forget async calls (no await, no .ContinueWith error handler)? Unhandled exceptions from fire-and-forget tasks are silently swallowed",
+    "",
+    "### API & Configuration",
+    "- Does rate limiting have `skipOnError: true`? (errors bypass protection)",
+    "- Is CORS configured with unvalidated env var origins?",
+    "- Are list endpoints missing pagination? (memory exhaustion at scale)",
+    "- Is error response format consistent across all routes? (`{ error }` vs `{ message }` vs `{ errors: [] }`)",
+]
+
+
 # ============================================================
 #  Diff-based review prompts (existing)
 # ============================================================
@@ -49,33 +79,9 @@ def build_system_prompt(detected_languages: list[str]) -> str:
                 parts.append(f"### {config.name}")
                 parts.append(f"- {config.expertise}")
 
+    parts.extend(_SECURITY_PATTERNS)
+
     parts.extend([
-        "",
-        "## Security Patterns (check each explicitly)",
-        "### Input Handling",
-        "- Path traversal: is input decoded BEFORE validation? (`%2e%2e` → `..` bypasses check)",
-        "- Is MIME type from client trusted without server-side magic-byte check?",
-        "- Are file paths normalized and verified to stay within a base directory?",
-        "- Is there a whitelist regex instead of a blacklist for input validation?",
-        "",
-        "### Authentication & Authorization",
-        "- Does auth return early for unknown user? (timing attack → username enumeration)",
-        "- Are there plaintext password comparisons or legacy plaintext fallbacks?",
-        "- Is the same authz check applied consistently across ALL routes for a given resource?",
-        "- Do auth hooks/middleware early-return after sending 401, or does the route handler still execute?",
-        "- Mixed auth patterns in same codebase (session vs JWT vs localStorage)?",
-        "",
-        "### Async & Concurrency",
-        "- Is synchronous I/O (File.ReadAllText, WebClient, HttpWebRequest) used inside async methods? Should use async equivalents (File.ReadAllTextAsync, HttpClient)",
-        "- Does read-modify-write lack a transaction or lock? (race condition)",
-        "- Is Task.WhenAll() used for bulk operations without per-task exception handling? (one failed task causes WhenAll to throw, silently dropping successful results)",
-        "- Are there fire-and-forget async calls (no await, no .ContinueWith error handler)? Unhandled exceptions from fire-and-forget tasks are silently swallowed",
-        "",
-        "### API & Configuration",
-        "- Does rate limiting have `skipOnError: true`? (errors bypass protection)",
-        "- Is CORS configured with unvalidated env var origins?",
-        "- Are list endpoints missing pagination? (memory exhaustion at scale)",
-        "- Is error response format consistent across all routes? (`{ error }` vs `{ message }` vs `{ errors: [] }`)",
         "",
         "## Output Format",
         "You MUST respond with valid JSON in this exact structure:",
@@ -181,33 +187,9 @@ def build_scan_system_prompt(detected_languages: list[str]) -> str:
         "- Concurrency and thread safety issues",
         "- Resource management (unclosed handles, missing cleanup)",
         "- Merge conflict artifacts and duplicate function/class definitions",
-        "",
-        "## Security Patterns (check each explicitly)",
-        "### Input Handling",
-        "- Path traversal: is input decoded BEFORE validation? (`%2e%2e` → `..` bypasses check)",
-        "- Is MIME type from client trusted without server-side magic-byte check?",
-        "- Are file paths normalized and verified to stay within a base directory?",
-        "- Is there a whitelist regex instead of a blacklist for input validation?",
-        "",
-        "### Authentication & Authorization",
-        "- Does auth return early for unknown user? (timing attack → username enumeration)",
-        "- Are there plaintext password comparisons or legacy plaintext fallbacks?",
-        "- Is the same authz check applied consistently across ALL routes for a given resource?",
-        "- Do auth hooks/middleware early-return after sending 401, or does the route handler still execute?",
-        "- Mixed auth patterns in same codebase (session vs JWT vs localStorage)?",
-        "",
-        "### Async & Concurrency",
-        "- Is synchronous I/O (File.ReadAllText, WebClient, HttpWebRequest) used inside async methods? Should use async equivalents (File.ReadAllTextAsync, HttpClient)",
-        "- Does read-modify-write lack a transaction or lock? (race condition)",
-        "- Is Task.WhenAll() used for bulk operations without per-task exception handling? (one failed task causes WhenAll to throw, silently dropping successful results)",
-        "- Are there fire-and-forget async calls (no await, no .ContinueWith error handler)? Unhandled exceptions from fire-and-forget tasks are silently swallowed",
-        "",
-        "### API & Configuration",
-        "- Does rate limiting have `skipOnError: true`? (errors bypass protection)",
-        "- Is CORS configured with unvalidated env var origins?",
-        "- Are list endpoints missing pagination? (memory exhaustion at scale)",
-        "- Is error response format consistent across all routes? (`{ error }` vs `{ message }` vs `{ errors: [] }`)",
     ]
+
+    parts.extend(_SECURITY_PATTERNS)
 
     if lang_configs:
         parts.append("")
