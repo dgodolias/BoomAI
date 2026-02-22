@@ -152,21 +152,66 @@ def _split_diff_by_file(diff: str) -> list[tuple[str, str]]:
 
 
 def _sanitize_json(text: str) -> str:
-    """Fix common Gemini JSON issues: trailing commas, truncated output."""
+    """Fix common Gemini JSON issues: trailing commas."""
     import re
-    # Remove trailing commas before } or ]
     text = re.sub(r',\s*([}\]])', r'\1', text)
     return text
+
+
+def _recover_truncated_json(text: str) -> dict | None:
+    """
+    Recover a valid response dict from a Gemini response truncated mid-string.
+
+    Strategy: extract the summary (if complete) then use raw_decode to pull
+    out each individual finding object one at a time, stopping at the first
+    truncated/invalid object.  Returns a dict or None if nothing recoverable.
+    """
+    import re
+
+    # Extract summary — only if the string is fully closed
+    summary = "Review completed (output truncated)."
+    summary_match = re.search(r'"summary"\s*:\s*("(?:[^"\\]|\\.)*")', text)
+    if summary_match:
+        try:
+            summary = json.loads(summary_match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # Find the start of the findings array
+    findings_array_match = re.search(r'"findings"\s*:\s*\[', text)
+    if not findings_array_match:
+        return None
+
+    decoder = json.JSONDecoder()
+    findings: list[dict] = []
+    pos = findings_array_match.end()
+
+    while pos < len(text):
+        # Skip whitespace and commas between objects
+        while pos < len(text) and text[pos] in ' \t\n\r,':
+            pos += 1
+        if pos >= len(text) or text[pos] in (']', '}'):
+            break
+        if text[pos] != '{':
+            break
+        try:
+            obj, end_pos = decoder.raw_decode(text, pos)
+            findings.append(obj)
+            pos = end_pos
+        except json.JSONDecodeError:
+            break  # rest of array is truncated — stop here
+
+    if not findings and summary == "Review completed (output truncated).":
+        return None  # nothing useful recovered
+
+    return {"summary": summary, "findings": findings, "critical_count": 0}
 
 
 def _parse_review_response(
     text: str, original_findings: list[Finding]
 ) -> ReviewSummary:
     """Parse Gemini's JSON response into a ReviewSummary."""
-    try:
-        sanitized = _sanitize_json(text)
-        decoder = json.JSONDecoder()
-        data, _ = decoder.raw_decode(sanitized)
+    def _build_summary(data: dict) -> ReviewSummary:
         comments = []
         for f in data.get("findings", []):
             comments.append(
@@ -179,7 +224,6 @@ def _parse_review_response(
                     old_code=f.get("old_code"),
                 )
             )
-
         critical_count = data.get("critical_count", 0)
         return ReviewSummary(
             summary=data.get("summary", "Review completed."),
@@ -187,9 +231,26 @@ def _parse_review_response(
             critical_count=critical_count,
             has_critical=critical_count > 0,
         )
+
+    # --- primary parse ---
+    try:
+        sanitized = _sanitize_json(text)
+        decoder = json.JSONDecoder()
+        data, _ = decoder.raw_decode(sanitized)
+        return _build_summary(data)
     except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.error(f"Failed to parse Gemini response: {e}\nRaw: {text[:500]}")
-        return _fallback_review(original_findings)
+        logger.warning(f"Failed to parse Gemini response: {e}\nRaw: {text[:500]}")
+
+    # --- truncation recovery ---
+    recovered = _recover_truncated_json(text)
+    if recovered:
+        logger.info(
+            f"Recovered {len(recovered['findings'])} finding(s) from truncated Gemini response"
+        )
+        return _build_summary(recovered)
+
+    logger.error("Gemini response unrecoverable — falling back to static findings only")
+    return _fallback_review(original_findings)
 
 
 def _fallback_review(findings: list[Finding]) -> ReviewSummary:
