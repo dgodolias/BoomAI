@@ -2,8 +2,8 @@ import logging
 
 import httpx
 
-from boomai.config import settings
-from boomai.models import ReviewSummary
+from .config import settings
+from .models import ReviewSummary
 
 logger = logging.getLogger(__name__)
 

@@ -6,18 +6,18 @@ import logging
 import os
 import sys
 
-from scripts.config import settings
-from scripts.github_client import GitHubClient
-from scripts.languages import detect_languages, filter_reviewable_files
-from scripts.static_analysis import (
+from .config import settings
+from .github_client import GitHubClient
+from .languages import detect_languages, filter_reviewable_files
+from .static_analysis import (
     run_semgrep,
     run_devskim,
     run_roslyn_build,
     filter_to_changed_files,
     prioritize_findings,
 )
-from scripts.gemini_review import review_with_gemini
-from scripts.slack_notifier import send_slack_alert
+from .gemini_review import review_with_gemini
+from .slack_notifier import send_slack_alert
 
 logging.basicConfig(
     level=logging.INFO,

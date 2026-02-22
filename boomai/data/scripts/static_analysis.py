@@ -6,8 +6,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from scripts.models import Finding, Severity, FindingSource
-from scripts.languages import LANGUAGES
+from .models import Finding, Severity, FindingSource
+from .languages import LANGUAGES
 
 logger = logging.getLogger(__name__)
 

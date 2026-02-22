@@ -5,7 +5,7 @@ import re
 
 from github import Github
 
-from boomai.config import settings
+from .config import settings
 
 logger = logging.getLogger(__name__)
 

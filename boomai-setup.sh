@@ -68,31 +68,32 @@ git checkout -b "$INSTALL_BRANCH"
 # --- Step 3: Copy BoomAI files ---
 echo "[3/5] Copying BoomAI files..."
 
+DATA_DIR="$BOOMAI_DIR/boomai/data"
+
 mkdir -p .github/workflows
 mkdir -p scripts
 mkdir -p rules/semgrep
 
-cp "$BOOMAI_DIR/.github/workflows/boomai.yml" .github/workflows/
-cp "$BOOMAI_DIR/scripts/__init__.py" scripts/
-cp "$BOOMAI_DIR/scripts/config.py" scripts/
-cp "$BOOMAI_DIR/scripts/models.py" scripts/
-cp "$BOOMAI_DIR/scripts/prompts.py" scripts/
-cp "$BOOMAI_DIR/scripts/languages.py" scripts/
-cp "$BOOMAI_DIR/scripts/gemini_review.py" scripts/
-cp "$BOOMAI_DIR/scripts/github_client.py" scripts/
-cp "$BOOMAI_DIR/scripts/static_analysis.py" scripts/
-cp "$BOOMAI_DIR/scripts/slack_notifier.py" scripts/
-cp "$BOOMAI_DIR/scripts/main.py" scripts/
-cp "$BOOMAI_DIR/scripts/apply_fixes.py" scripts/
-cp "$BOOMAI_DIR/rules/semgrep/unity-rules.yml" rules/semgrep/
-cp "$BOOMAI_DIR/requirements.txt" .
+# Shared files — canonical source in boomai/ (relative imports, work in any package)
+for f in models.py languages.py prompts.py github_client.py slack_notifier.py apply_fixes.py; do
+    cp "$BOOMAI_DIR/boomai/$f" scripts/
+done
+
+# CI-specific files — overrides with CI-specific config/behavior
+for f in __init__.py config.py static_analysis.py gemini_review.py main.py; do
+    cp "$DATA_DIR/scripts/$f" scripts/
+done
+
+# Workflow, semgrep rules, and Python deps
+cp "$DATA_DIR/workflows/boomai.yml" .github/workflows/
+cp "$DATA_DIR/semgrep/unity-rules.yml" rules/semgrep/
+cp "$DATA_DIR/requirements.txt" .
 
 git add .
 git commit -m "Add BoomAI automated code review
 
-- AI-powered review using Gemini 3.1 Pro
-- Multi-language: TypeScript, JavaScript, Python, C#, Java, Go
-- Static analysis with Semgrep
+- AI-powered C#/Unity review using Gemini 3.1 Pro
+- Static analysis with Semgrep + DevSkim + Roslyn
 - Inline PR suggestions with one-click apply
 - All env vars prefixed BOOMAI_* (no conflicts)"
 
@@ -111,12 +112,12 @@ Adds BoomAI to this repository. This PR will be auto-merged.
 
 ### What it does
 - Automatically reviews every PR using **Gemini 3.1 Pro AI**
-- Runs **Semgrep** static analysis
+- Runs **Semgrep + DevSkim + Roslyn** static analysis
 - Posts **inline suggestions** (one-click apply)
 - All env vars prefixed \`BOOMAI_*\` (no conflicts with existing secrets)
 
 ### Supported languages
-TypeScript, JavaScript, Python, C#/Unity, Java, Go
+C#/Unity
 
 ### Commands
 - \`/boomAI apply-all\` — Apply all suggested fixes

@@ -6,9 +6,9 @@ import logging
 
 import httpx
 
-from scripts.config import settings
-from scripts.models import Finding, ReviewComment, ReviewSummary, Severity
-from scripts.prompts import build_system_prompt, build_user_message
+from .config import settings
+from .models import Finding, ReviewComment, ReviewSummary, Severity
+from .prompts import build_system_prompt, build_user_message
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
 """Dynamic prompt builder for C#/Unity code review."""
 
-from boomai.languages import LANGUAGES
+from .languages import LANGUAGES
 
 
 def _build_language_extras(lang_configs: list) -> list[str]:
@@ -48,7 +48,7 @@ _SECURITY_PATTERNS = [
 
 
 # ============================================================
-#  Diff-based review prompts (existing)
+#  Diff-based review prompts
 # ============================================================
 
 def build_system_prompt(detected_languages: list[str]) -> str:
@@ -156,7 +156,7 @@ def build_user_message(
 
 
 # ============================================================
-#  Full-codebase scan prompts (new)
+#  Full-codebase scan prompts
 # ============================================================
 
 def build_scan_system_prompt(detected_languages: list[str]) -> str:

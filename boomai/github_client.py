@@ -1,7 +1,7 @@
 import logging
 from github import Github
-from boomai.config import settings
-from boomai.models import ReviewSummary
+from .config import settings
+from .models import ReviewSummary
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class GitHubClient:
         comments = []
         for finding in summary.findings:
             body = finding.body
-            if finding.suggestion:
+            if finding.suggestion is not None:
                 body += f"\n\n```suggestion\n{finding.suggestion}\n```"
 
             comment_kwargs = {

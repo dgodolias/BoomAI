@@ -6,9 +6,9 @@ import logging
 
 import httpx
 
-from boomai.config import settings
-from boomai.models import Finding, ReviewComment, ReviewSummary, Severity
-from boomai.prompts import (
+from .config import settings
+from .models import Finding, ReviewComment, ReviewSummary, Severity
+from .prompts import (
     build_system_prompt, build_user_message,
     build_scan_system_prompt, build_scan_user_message,
 )
