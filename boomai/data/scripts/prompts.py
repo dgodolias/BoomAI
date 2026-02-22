@@ -1,4 +1,4 @@
-"""Dynamic prompt builder for multi-language code review."""
+"""Dynamic prompt builder for C#/Unity code review."""
 
 from scripts.languages import LANGUAGES
 
@@ -34,10 +34,10 @@ _SECURITY_PATTERNS = [
     "- Mixed auth patterns in same codebase (session vs JWT vs localStorage)?",
     "",
     "### Async & Concurrency",
-    "- Is `readFileSync`/`writeFileSync`/`execSync` used inside async functions?",
+    "- Is synchronous I/O (File.ReadAllText, WebClient, HttpWebRequest) used inside async methods? Should use async equivalents (File.ReadAllTextAsync, HttpClient)",
     "- Does read-modify-write lack a transaction or lock? (race condition)",
-    "- Is `Promise.all()` used for bulk operations? (should be `Promise.allSettled()` with partial failure handling)",
-    "- Are there missing `await` on async calls?",
+    "- Is Task.WhenAll() used for bulk operations without per-task exception handling? (one failed task causes WhenAll to throw, silently dropping successful results)",
+    "- Are there fire-and-forget async calls (no await, no .ContinueWith error handler)? Unhandled exceptions from fire-and-forget tasks are silently swallowed",
     "",
     "### API & Configuration",
     "- Does rate limiting have `skipOnError: true`? (errors bypass protection)",

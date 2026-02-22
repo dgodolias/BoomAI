@@ -1,4 +1,4 @@
-"""Language detection and configuration for multi-language code review."""
+"""Language detection and configuration for C#/Unity code review."""
 
 import logging
 import os
@@ -47,96 +47,6 @@ LANGUAGES: dict[str, LanguageConfig] = {
             "Event handler asymmetry: `+=` added in Register/Add method but `-=` missing in the paired Unregister/Remove method — causes double invocation after Stop+Start or scene reload cycles",
             "Collection pre-allocated from network-provided element count without bytes-available guard (`new List<T>(networkLength)`) — element-count limit allows multi-GB allocation if T is a large struct",
             "NetworkReader position desync: skipping a component's dirty bit without consuming its serialized bytes — subsequent components deserialize corrupt data",
-        ],
-    ),
-    "typescript": LanguageConfig(
-        name="TypeScript",
-        extensions=[".ts", ".tsx"],
-        semgrep_rulesets=["p/typescript"],
-        expertise=(
-            "TypeScript strict mode and type safety. "
-            "React component patterns (hooks, memoization, render optimization). "
-            "Async/await error handling. Promise patterns. "
-            "Module import organization. Null/undefined safety."
-        ),
-        prompt_extras=[
-            "Type safety gaps and `any` casts",
-            "Unhandled promise rejections",
-            "`readFileSync`/`writeFileSync`/`execSync` inside async functions (blocks event loop)",
-            "`Promise.all()` for bulk ops without `Promise.allSettled()` (silent partial failure)",
-            "Read-modify-write without transaction/locking (race condition)",
-            "Input validation BEFORE URL decoding (`%2e%2e` bypasses `..` check)",
-            "Client-provided MIME types trusted without magic-byte validation",
-            "Auth that returns early for unknown user (timing attack / username enumeration)",
-            "Fastify/Express middleware that sends reply without early `return` (route still executes)",
-            "Mixed auth patterns (session cookies vs stateless JWT vs localStorage) in same codebase",
-            "RBAC checks inconsistent across routes for the same resource type",
-        ],
-    ),
-    "javascript": LanguageConfig(
-        name="JavaScript",
-        extensions=[".js", ".jsx"],
-        semgrep_rulesets=["p/javascript"],
-        expertise=(
-            "Modern ES2022+ patterns. React component patterns. "
-            "Async/await and Promise handling. Closure and scope issues. "
-            "Event loop understanding. Module system (ESM vs CJS)."
-        ),
-        prompt_extras=[
-            "Prototype and closure pitfalls",
-            "Unhandled async errors",
-            "`Promise.all()` for bulk ops without `Promise.allSettled()`",
-            "Sync I/O (readFileSync) in async context",
-        ],
-    ),
-    "python": LanguageConfig(
-        name="Python",
-        extensions=[".py"],
-        semgrep_rulesets=["p/python"],
-        expertise=(
-            "PEP 8 style and idioms. Type hints and mypy compatibility. "
-            "Context managers and resource cleanup. "
-            "Async/await patterns. Security pitfalls (injection, pickle). "
-            "Performance (generators, list comprehensions)."
-        ),
-        prompt_extras=[
-            "Type hint correctness",
-            "Resource leaks (unclosed files, connections)",
-            "Security issues (injection, unsafe deserialization, pickle)",
-            "Mutable default arguments",
-            "Exception swallowing (bare `except:` clauses)",
-        ],
-    ),
-    "java": LanguageConfig(
-        name="Java",
-        extensions=[".java"],
-        semgrep_rulesets=["p/java"],
-        expertise=(
-            "Java best practices and design patterns. "
-            "Null safety (Optional usage). Resource management (try-with-resources). "
-            "Concurrency and thread safety. Stream API usage."
-        ),
-        prompt_extras=[
-            "Null pointer dereference without Optional",
-            "Resource leaks (missing try-with-resources)",
-            "Thread safety issues (shared mutable state)",
-            "Checked exceptions swallowed silently",
-        ],
-    ),
-    "go": LanguageConfig(
-        name="Go",
-        extensions=[".go"],
-        semgrep_rulesets=["p/go"],
-        expertise=(
-            "Go idioms and effective Go patterns. "
-            "Error handling (no swallowed errors). Goroutine and channel safety. "
-            "defer/panic/recover patterns. Context propagation."
-        ),
-        prompt_extras=[
-            "Swallowed errors (err assigned but not checked)",
-            "Goroutine leaks (goroutine started without cancel/done signal)",
-            "Race conditions on shared state without mutex",
-            "Missing context propagation in API calls",
         ],
     ),
 }
