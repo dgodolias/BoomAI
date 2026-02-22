@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     scan_output_tokens: int = 65536
     scan_timeout: float = 600.0
 
+    # Scan planning (repo-map phase)
+    plan_output_tokens: int = 32768
+    plan_timeout: float = 300.0
+
     model_config = {
         "env_file": (".env", str(_global_env)),
         "env_file_encoding": "utf-8",

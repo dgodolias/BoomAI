@@ -242,6 +242,45 @@ def build_scan_system_prompt(detected_languages: list[str]) -> str:
     return "\n".join(parts)
 
 
+# ============================================================
+#  Scan planning prompt (repo-map phase)
+# ============================================================
+
+def build_plan_prompt(char_budget: int) -> str:
+    """Build system prompt for the scan planning phase."""
+    return f"""You are BoomAI's planning module. You receive a repository map showing
+the folder structure with file sizes (lines and characters).
+
+Your job: group files into review chunks for an AI code reviewer.
+
+## Rules
+- Each chunk MUST stay under {char_budget:,} characters total (sum of all file char counts)
+- Group related files together (same namespace/module, a class + its tests, a controller + its service)
+- Put the most complex/largest files in smaller chunks so they get full reviewer attention
+- Every file in the map MUST appear in exactly one chunk — do not skip any
+- Order chunks so the most important/complex ones come first
+
+## Output Format
+Respond with valid JSON only:
+{{
+  "chunks": [
+    {{
+      "files": ["path/to/file1.cs", "path/to/file2.cs"],
+      "focus": "Brief description of what this chunk covers"
+    }}
+  ]
+}}"""
+
+
+def build_plan_user_message(repo_map: str, total_files: int, total_chars: int) -> str:
+    """Build user message for the scan planning phase."""
+    return f"""## Repository Map ({total_files} files, {total_chars:,} characters total)
+
+{repo_map}
+
+Group these files into review chunks following the rules in the system prompt."""
+
+
 def build_scan_user_message(
     file_contents: list[tuple[str, str]],
     finding_count: int,

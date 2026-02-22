@@ -543,10 +543,8 @@ async def run_local_scan(repo_path: str = ".",
     # Read file contents
     file_contents = read_file_contents(reviewable, repo_path)
     total_chars = sum(len(c) for _, c in file_contents)
-    num_chunks = max(1, -(-total_chars // settings.max_scan_chars))
     print(f"  Total source: {total_chars:,} chars across {len(file_contents)} files")
-    print(f"  Sending to Gemini ({settings.llm_model})"
-          f"{f' in {num_chunks} chunk(s)' if num_chunks > 1 else ''}...")
+    print(f"  Sending to Gemini ({settings.llm_model})...")
 
     return await scan_with_gemini(
         file_contents=file_contents,

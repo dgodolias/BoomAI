@@ -11,6 +11,7 @@ from .models import Finding, ReviewComment, ReviewSummary, Severity
 from .prompts import (
     build_system_prompt, build_user_message,
     build_scan_system_prompt, build_scan_user_message,
+    build_plan_prompt, build_plan_user_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -260,6 +261,138 @@ def _parse_review_response(
 #  Full-codebase scan
 # ============================================================
 
+def _build_repo_map(file_contents: list[tuple[str, str]]) -> str:
+    """Build a tree-view string of the repo for LLM planning.
+
+    Output looks like:
+      Assets/Scripts/Behaviours/Ped/
+        Ped.cs                          (850 lines, 28.1K)
+        PedModel.cs                     (120 lines, 3.9K)
+      Assets/Scripts/Networking/
+        PedSync.cs                      (180 lines, 5.8K)
+    """
+    from collections import defaultdict
+    import posixpath
+
+    # Group files by directory
+    dirs: dict[str, list[tuple[str, int, int]]] = defaultdict(list)
+    for path, content in file_contents:
+        norm = path.replace("\\", "/")
+        folder = posixpath.dirname(norm) or "."
+        lines = content.count("\n") + 1
+        chars = len(content)
+        dirs[folder].append((posixpath.basename(norm), lines, chars))
+
+    lines_out: list[str] = []
+    for folder in sorted(dirs):
+        files = sorted(dirs[folder], key=lambda x: -x[2])  # largest first
+        dir_chars = sum(c for _, _, c in files)
+        lines_out.append(f"  {folder}/  ({len(files)} files, {dir_chars:,} chars)")
+        for name, line_count, char_count in files:
+            size_str = (
+                f"{char_count / 1000:.1f}K" if char_count >= 1000
+                else f"{char_count}"
+            )
+            lines_out.append(f"    {name:<45} ({line_count} lines, {size_str})")
+
+    return "\n".join(lines_out)
+
+
+async def _plan_chunks(
+    file_contents: list[tuple[str, str]],
+    detected_languages: list[str],
+    char_budget: int,
+) -> list[list[tuple[str, str]]] | None:
+    """Ask Gemini to plan optimal file groupings. Returns None on failure."""
+    repo_map = _build_repo_map(file_contents)
+    total_files = len(file_contents)
+    total_chars = sum(len(c) for _, c in file_contents)
+
+    system_prompt = build_plan_prompt(char_budget)
+    user_message = build_plan_user_message(repo_map, total_files, total_chars)
+
+    url = (
+        f"{settings.gemini_base_url}/{settings.llm_model}"
+        f":generateContent?key={settings.google_api_key}"
+    )
+
+    logger.info("Planning chunk layout via LLM...")
+
+    response = await _gemini_post(url, {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_message}]}],
+        "generationConfig": {
+            "maxOutputTokens": settings.plan_output_tokens,
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+        },
+    }, timeout=settings.plan_timeout)
+
+    if response is None or response.status_code != 200:
+        logger.warning("Planning call failed, falling back to greedy chunking")
+        return None
+
+    try:
+        result = response.json()
+        text = result["candidates"][0]["content"]["parts"][0]["text"]
+        sanitized = _sanitize_json(text)
+        data = json.loads(sanitized)
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+        logger.warning(f"Failed to parse planning response: {e}")
+        return None
+
+    # Build lookup: normalized path -> (path, content)
+    content_map: dict[str, tuple[str, str]] = {}
+    for path, content in file_contents:
+        content_map[path.replace("\\", "/")] = (path, content)
+
+    # Validate and build chunks
+    planned_chunks: list[list[tuple[str, str]]] = []
+    seen: set[str] = set()
+
+    for chunk_def in data.get("chunks", []):
+        chunk_files: list[tuple[str, str]] = []
+        chunk_chars = 0
+        for file_path in chunk_def.get("files", []):
+            norm = file_path.replace("\\", "/")
+            if norm not in content_map:
+                logger.warning(f"Planning: unknown file '{file_path}', skipping")
+                continue
+            if norm in seen:
+                logger.warning(f"Planning: duplicate file '{file_path}', skipping")
+                continue
+            seen.add(norm)
+            pair = content_map[norm]
+            chunk_files.append(pair)
+            chunk_chars += len(pair[1])
+        if chunk_files:
+            planned_chunks.append(chunk_files)
+
+    # Check coverage — every file must be assigned
+    all_paths = set(p.replace("\\", "/") for p, _ in file_contents)
+    missing = all_paths - seen
+    if missing:
+        logger.warning(
+            f"Planning missed {len(missing)} file(s), appending as extra chunk"
+        )
+        extra = [content_map[p] for p in sorted(missing)]
+        planned_chunks.append(extra)
+
+    if not planned_chunks:
+        logger.warning("Planning returned empty chunks, falling back")
+        return None
+
+    focus_list = [c.get("focus", "") for c in data.get("chunks", [])]
+    logger.info(
+        f"Planned {len(planned_chunks)} chunks: "
+        + ", ".join(
+            f"[{len(ch)} files{' — ' + focus_list[i] if i < len(focus_list) and focus_list[i] else ''}]"
+            for i, ch in enumerate(planned_chunks)
+        )
+    )
+    return planned_chunks
+
+
 def _chunk_files(
     file_contents: list[tuple[str, str]],
     char_budget: int,
@@ -364,7 +497,12 @@ async def scan_with_gemini(
     if detected_languages is None:
         detected_languages = []
 
-    chunks = _chunk_files(file_contents, settings.max_scan_chars)
+    # Try LLM-planned chunks first, fall back to greedy
+    chunks = await _plan_chunks(
+        file_contents, detected_languages, settings.max_scan_chars,
+    )
+    if chunks is None:
+        chunks = _chunk_files(file_contents, settings.max_scan_chars)
 
     if len(chunks) == 1:
         return await _scan_chunk(chunks[0], findings, detected_languages)
