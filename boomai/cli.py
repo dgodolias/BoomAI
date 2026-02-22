@@ -23,7 +23,7 @@ from boomai.config import settings
 from boomai.gemini_review import review_with_gemini
 from boomai.languages import detect_languages, filter_reviewable_files
 from boomai.models import ReviewSummary
-from boomai.static_analysis import run_semgrep, run_devskim, run_roslyn_build
+from boomai.static_analysis import run_semgrep, run_devskim, run_roslyn_build, run_gitleaks
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,8 @@ def _line_match(content: str, old_code: str, hint_line: int) -> tuple[int, int] 
 
     Returns (start_line_idx, line_count) or None.
     Picks the match closest to hint_line when multiple exist.
+    Uses two passes: first trailing-whitespace-tolerant, then
+    fully-stripped fallback for indentation mismatches.
     """
     content_lines = content.split('\n')
     old_lines = old_code.strip().split('\n')
@@ -115,12 +117,26 @@ def _line_match(content: str, old_code: str, hint_line: int) -> tuple[int, int] 
         return None
 
     n = len(old_stripped)
+
+    # Pass 1: trailing-whitespace-tolerant (preserves leading indent check)
     best: tuple[int, int] | None = None
     best_distance = float('inf')
-
     for i in range(len(content_lines) - n + 1):
         window = [content_lines[i + j].rstrip() for j in range(n)]
         if window == old_stripped:
+            distance = abs(i - (hint_line - 1))
+            if distance < best_distance:
+                best_distance = distance
+                best = (i, n)
+    if best is not None:
+        return best
+
+    # Pass 2: fully-stripped fallback (handles indentation mismatch from Gemini)
+    old_fully_stripped = [l.strip() for l in old_stripped]
+    best_distance = float('inf')
+    for i in range(len(content_lines) - n + 1):
+        window = [content_lines[i + j].strip() for j in range(n)]
+        if window == old_fully_stripped:
             distance = abs(i - (hint_line - 1))
             if distance < best_distance:
                 best_distance = distance
@@ -351,19 +367,18 @@ async def run_local_review(base: str, head: str, repo_path: str = ".",
     print(f"  Running static analysis...")
     findings = []
     if reviewable:
-        try:
-            findings.extend(run_semgrep(reviewable, languages))
-            print(f"  Semgrep: {len(findings)} finding(s)")
-        except Exception:
-            print(f"  Semgrep skipped (not available locally)")
-        devskim = run_devskim(repo_path, reviewable)
-        if devskim:
-            print(f"  DevSkim: {len(devskim)} finding(s)")
-        findings.extend(devskim)
-        roslyn = run_roslyn_build(repo_path, reviewable)
-        if roslyn:
-            print(f"  Roslyn: {len(roslyn)} finding(s)")
-        findings.extend(roslyn)
+        semgrep_findings, semgrep_status = run_semgrep(reviewable, languages)
+        print(f"  Semgrep: {semgrep_status}")
+        findings.extend(semgrep_findings)
+        devskim_findings, devskim_status = run_devskim(repo_path, reviewable)
+        print(f"  DevSkim: {devskim_status}")
+        findings.extend(devskim_findings)
+        roslyn_findings, roslyn_status = run_roslyn_build(repo_path, reviewable)
+        print(f"  Roslyn: {roslyn_status}")
+        findings.extend(roslyn_findings)
+        gitleaks_findings, gitleaks_status = run_gitleaks(repo_path, reviewable)
+        print(f"  Gitleaks: {gitleaks_status}")
+        findings.extend(gitleaks_findings)
 
     diff = git_diff(base, head, repo_path, exclude=exclude) or ""
     print(f"  Diff size: {len(diff)} chars")
@@ -519,26 +534,32 @@ async def run_local_scan(repo_path: str = ".",
             has_critical=False,
         )
 
-    # Run all static analysis tools in parallel (fail-safe)
+    # Run all static analysis tools (fail-safe)
     print(f"  Running static analysis...")
     SEMGREP_BATCH = 50
     findings = []
-    try:
-        for i in range(0, len(reviewable), SEMGREP_BATCH):
-            batch = reviewable[i:i + SEMGREP_BATCH]
-            findings.extend(run_semgrep(batch, languages))
-        if findings:
-            print(f"  Semgrep: {len(findings)} finding(s)")
-    except Exception:
-        print(f"  Semgrep skipped (not available locally)")
-    devskim = run_devskim(repo_path, reviewable)
-    if devskim:
-        print(f"  DevSkim: {len(devskim)} finding(s)")
-    findings.extend(devskim)
-    roslyn = run_roslyn_build(repo_path, reviewable)
-    if roslyn:
-        print(f"  Roslyn: {len(roslyn)} finding(s)")
-    findings.extend(roslyn)
+    semgrep_total = 0
+    semgrep_status = "0 finding(s)"
+    for i in range(0, len(reviewable), SEMGREP_BATCH):
+        batch = reviewable[i:i + SEMGREP_BATCH]
+        batch_findings, batch_status = run_semgrep(batch, languages)
+        findings.extend(batch_findings)
+        semgrep_total += len(batch_findings)
+        if "not installed" in batch_status or "error" in batch_status:
+            semgrep_status = batch_status
+            break
+    else:
+        semgrep_status = f"{semgrep_total} finding(s)"
+    print(f"  Semgrep: {semgrep_status}")
+    devskim_findings, devskim_status = run_devskim(repo_path, reviewable)
+    print(f"  DevSkim: {devskim_status}")
+    findings.extend(devskim_findings)
+    roslyn_findings, roslyn_status = run_roslyn_build(repo_path, reviewable)
+    print(f"  Roslyn: {roslyn_status}")
+    findings.extend(roslyn_findings)
+    gitleaks_findings, gitleaks_status = run_gitleaks(repo_path, reviewable)
+    print(f"  Gitleaks: {gitleaks_status}")
+    findings.extend(gitleaks_findings)
 
     # Read file contents
     file_contents = read_file_contents(reviewable, repo_path)
@@ -695,6 +716,237 @@ def cmd_config(args):
 
 
 # ============================================================
+#  install-tools
+# ============================================================
+
+_TOOLS = [
+    {
+        "name": "Semgrep",
+        "cmd": "semgrep",
+        "check": ["semgrep", "--version"],
+        "install_cmd": [sys.executable, "-m", "pip", "install", "semgrep"],
+        "install_hint": "pip install semgrep",
+        "auto": True,
+    },
+    {
+        "name": "DevSkim",
+        "cmd": "devskim",
+        "check": ["devskim", "--version"],
+        "install_cmd": ["dotnet", "tool", "install", "-g", "Microsoft.CST.DevSkim.CLI"],
+        "install_hint": "dotnet tool install -g Microsoft.CST.DevSkim.CLI",
+        "auto": True,
+        "requires": "dotnet",
+    },
+    {
+        "name": "Gitleaks",
+        "cmd": "gitleaks",
+        "check": ["gitleaks", "version"],
+        "install_cmd": None,
+        "install_fn": "_install_gitleaks",
+        "install_hint": "https://github.com/gitleaks/gitleaks#installing",
+        "auto": True,
+    },
+    {
+        "name": "Roslyn (.NET SDK)",
+        "cmd": "dotnet",
+        "check": ["dotnet", "--version"],
+        "install_cmd": None,
+        "install_hint": "https://dotnet.microsoft.com/download",
+        "auto": False,
+    },
+]
+
+
+def _install_gitleaks() -> bool:
+    """Download and install Gitleaks from GitHub releases."""
+    import io
+    import platform
+    import urllib.request
+    import zipfile
+
+    arch = platform.machine().lower()
+    if arch in ("x86_64", "amd64"):
+        arch_suffix = "x64"
+    elif arch in ("aarch64", "arm64"):
+        arch_suffix = "arm64"
+    else:
+        arch_suffix = "x64"
+
+    system = platform.system().lower()
+    if system == "windows":
+        os_name = "windows"
+        binary = "gitleaks.exe"
+    elif system == "darwin":
+        os_name = "darwin"
+        binary = "gitleaks"
+    else:
+        os_name = "linux"
+        binary = "gitleaks"
+
+    # Get latest release tag from GitHub API
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/gitleaks/gitleaks/releases/latest",
+            headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "BoomAI"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            import json as _json
+            release = _json.loads(resp.read())
+            tag = release["tag_name"]  # e.g. "v8.30.0"
+    except Exception as e:
+        print(f"    Failed to get latest release: {e}")
+        return False
+
+    version = tag.lstrip("v")
+    zip_name = f"gitleaks_{version}_{os_name}_{arch_suffix}.zip"
+    url = f"https://github.com/gitleaks/gitleaks/releases/download/{tag}/{zip_name}"
+
+    # Download to a tools directory
+    tools_dir = Path.home() / ".boomai" / "tools"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        print(f"    Downloading {zip_name}...")
+        req = urllib.request.Request(url, headers={"User-Agent": "BoomAI"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = resp.read()
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            zf.extract(binary, str(tools_dir))
+        bin_path = tools_dir / binary
+        bin_path.chmod(0o755)
+        print(f"    Installed to {bin_path}")
+        # Add to PATH hint
+        if str(tools_dir) not in os.environ.get("PATH", ""):
+            print(f"    Add to PATH: {tools_dir}")
+        return True
+    except Exception as e:
+        print(f"    Download failed: {e}")
+        return False
+
+
+_EXTRA_TOOL_DIRS = [
+    Path.home() / ".dotnet" / "tools",
+    Path.home() / ".boomai" / "tools",
+]
+
+
+def _find_tool(name: str) -> str | None:
+    """Find a tool binary, checking extra tool directories beyond system PATH."""
+    found = shutil.which(name)
+    if found:
+        return found
+    old_path = os.environ.get("PATH", "")
+    try:
+        extra = os.pathsep.join(str(p) for p in _EXTRA_TOOL_DIRS if p.exists())
+        os.environ["PATH"] = f"{extra}{os.pathsep}{old_path}"
+        found = shutil.which(name)
+    finally:
+        os.environ["PATH"] = old_path
+    return found
+
+
+def _tool_available(check_cmd: list[str]) -> str | None:
+    """Return version string if tool is available, None otherwise."""
+    # Resolve the binary to its full path first (Windows needs this)
+    binary = _find_tool(check_cmd[0])
+    if not binary:
+        return None
+    try:
+        result = subprocess.run(
+            [binary] + check_cmd[1:], capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        # Some tools print version to stderr (e.g. DevSkim)
+        output = (result.stdout.strip() or result.stderr.strip())
+        return output.split("\n")[0] if output else "installed"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def cmd_install_tools(args):
+    """Check and optionally install static analysis tools."""
+    print()
+    print("  BoomAI Static Analysis Tools")
+    print("  " + "=" * 40)
+    print()
+
+    missing_auto = []
+    missing_manual = []
+
+    for tool in _TOOLS:
+        version = _tool_available(tool["check"])
+        if version:
+            print(f"  {tool['name']:<20} installed ({version})")
+        else:
+            print(f"  {tool['name']:<20} NOT INSTALLED")
+            if tool["auto"]:
+                # Check if prerequisite is available
+                req = tool.get("requires")
+                if req and not shutil.which(req):
+                    print(f"    -> Requires {req} (not found)")
+                    missing_manual.append(tool)
+                else:
+                    missing_auto.append(tool)
+            else:
+                missing_manual.append(tool)
+
+    print()
+
+    if not missing_auto and not missing_manual:
+        print("  All tools installed!")
+        return
+
+    # Auto-install what we can
+    if missing_auto:
+        if not args.yes:
+            names = ", ".join(t["name"] for t in missing_auto)
+            print(f"  Can auto-install: {names}")
+            try:
+                answer = input("  Install now? [Y/n] ").strip().lower()
+                if answer and answer != "y":
+                    missing_auto = []
+            except (EOFError, KeyboardInterrupt):
+                print()
+                print("  Skipping auto-install (non-interactive). Use --yes to auto-install.")
+                missing_auto = []
+
+        for tool in missing_auto:
+            print(f"  Installing {tool['name']}...")
+            try:
+                install_fn_name = tool.get("install_fn")
+                if install_fn_name:
+                    # Custom install function (e.g. binary download)
+                    fn = globals()[install_fn_name]
+                    if fn():
+                        print(f"    {tool['name']} installed successfully!")
+                    else:
+                        print(f"    Manual: {tool['install_hint']}")
+                elif tool.get("install_cmd"):
+                    result = subprocess.run(
+                        tool["install_cmd"],
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    if result.returncode == 0:
+                        print(f"    {tool['name']} installed successfully!")
+                    else:
+                        print(f"    Failed: {result.stderr.strip()[:200]}")
+                        print(f"    Manual: {tool['install_hint']}")
+            except Exception as e:
+                print(f"    Failed: {e}")
+                print(f"    Manual: {tool['install_hint']}")
+
+    # Show manual install instructions
+    if missing_manual:
+        print()
+        print("  Manual install required:")
+        for tool in missing_manual:
+            print(f"    {tool['name']}: {tool['install_hint']}")
+
+    print()
+
+
+# ============================================================
 #  Main CLI
 # ============================================================
 
@@ -756,6 +1008,11 @@ Examples (run from inside your project):
     p_scan.add_argument("--apply", action="store_true",
                         help="Automatically apply all fixable suggestions")
 
+    # --- install-tools ---
+    p_tools = sub.add_parser("install-tools", help="Check & install static analysis tools")
+    p_tools.add_argument("-y", "--yes", action="store_true",
+                         help="Auto-install without prompting")
+
     # --- config ---
     p_config = sub.add_parser("config", help="View or update configuration")
     config_sub = p_config.add_subparsers(dest="config_command")
@@ -788,6 +1045,8 @@ Examples (run from inside your project):
         cmd_apply(args)
     elif args.command == "scan":
         cmd_scan(args)
+    elif args.command == "install-tools":
+        cmd_install_tools(args)
     elif args.command == "config":
         cmd_config(args)
     elif args.command == "pr":

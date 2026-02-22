@@ -13,6 +13,7 @@ from .static_analysis import (
     run_semgrep,
     run_devskim,
     run_roslyn_build,
+    run_gitleaks,
     filter_to_changed_files,
     prioritize_findings,
 )
@@ -56,9 +57,18 @@ async def run_review():
     # 3. Run all static analysis tools (fail-safe — skip unavailable tools)
     logger.info("Running static analysis...")
     all_findings = []
-    all_findings.extend(run_semgrep(reviewable_files, detected_languages))
-    all_findings.extend(run_devskim(".", reviewable_files))
-    all_findings.extend(run_roslyn_build(".", reviewable_files))
+    semgrep_findings, semgrep_status = run_semgrep(reviewable_files, detected_languages)
+    logger.info(f"Semgrep: {semgrep_status}")
+    all_findings.extend(semgrep_findings)
+    devskim_findings, devskim_status = run_devskim(".", reviewable_files)
+    logger.info(f"DevSkim: {devskim_status}")
+    all_findings.extend(devskim_findings)
+    roslyn_findings, roslyn_status = run_roslyn_build(".", reviewable_files)
+    logger.info(f"Roslyn: {roslyn_status}")
+    all_findings.extend(roslyn_findings)
+    gitleaks_findings, gitleaks_status = run_gitleaks(".", reviewable_files)
+    logger.info(f"Gitleaks: {gitleaks_status}")
+    all_findings.extend(gitleaks_findings)
     all_findings = filter_to_changed_files(all_findings, filenames)
     top_findings = prioritize_findings(all_findings, settings.max_findings)
 

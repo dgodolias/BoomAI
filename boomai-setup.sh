@@ -112,7 +112,7 @@ Adds BoomAI to this repository. This PR will be auto-merged.
 
 ### What it does
 - Automatically reviews every PR using **Gemini 3.1 Pro AI**
-- Runs **Semgrep + DevSkim + Roslyn** static analysis
+- Runs **Semgrep + DevSkim + Roslyn + Gitleaks** static analysis
 - Posts **inline suggestions** (one-click apply)
 - All env vars prefixed \`BOOMAI_*\` (no conflicts with existing secrets)
 

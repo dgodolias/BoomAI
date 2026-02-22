@@ -14,6 +14,7 @@ class FindingSource(str, Enum):
     SEMGREP = "semgrep"
     DEVSKIM = "devskim"
     ROSLYN = "roslyn"
+    GITLEAKS = "gitleaks"
     AI = "ai"
 
 

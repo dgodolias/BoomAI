@@ -11,6 +11,31 @@ from .languages import LANGUAGES
 
 logger = logging.getLogger(__name__)
 
+
+import shutil as _shutil
+
+_EXTRA_TOOL_DIRS = [
+    Path.home() / ".dotnet" / "tools",
+    Path.home() / ".boomai" / "tools",
+]
+
+
+def _find_tool(name: str) -> str:
+    """Find a tool binary, checking extra tool directories beyond system PATH."""
+    # First check system PATH
+    found = _shutil.which(name)
+    if found:
+        return found
+    # Check extra tool directories
+    old_path = os.environ.get("PATH", "")
+    try:
+        extra = os.pathsep.join(str(p) for p in _EXTRA_TOOL_DIRS if p.exists())
+        os.environ["PATH"] = f"{extra}{os.pathsep}{old_path}"
+        found = _shutil.which(name)
+    finally:
+        os.environ["PATH"] = old_path
+    return found or name  # fallback to bare name (will raise FileNotFoundError)
+
 # Regex for dotnet build diagnostic output:
 # /path/to/File.cs(42,8): warning CA2000: Description [project.csproj]
 _DOTNET_DIAG = re.compile(
@@ -66,11 +91,11 @@ def _parse_sarif(
 
 def run_semgrep(
     changed_files: list[str], detected_languages: list[str]
-) -> list[Finding]:
+) -> tuple[list[Finding], str]:
     """Run Semgrep with appropriate rulesets based on detected languages."""
     if not changed_files:
         logger.info("No reviewable files, skipping Semgrep")
-        return []
+        return [], "skipped (no files)"
 
     rules_dir = Path(__file__).parent / "data" / "semgrep"
 
@@ -88,7 +113,7 @@ def run_semgrep(
 
     if not config_args:
         logger.info("No Semgrep rulesets for detected languages, skipping")
-        return []
+        return [], "skipped (no rulesets for detected languages)"
 
     cmd = ["semgrep", *config_args, "--json", "--no-git-ignore"] + changed_files
 
@@ -97,7 +122,10 @@ def run_semgrep(
         result = subprocess.run(cmd, capture_output=True, timeout=120, env=env)
         stdout = result.stdout.decode("utf-8", errors="replace")
         if result.returncode not in (0, 1):
-            return []
+            stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
+            if stderr_text:
+                logger.error(f"Semgrep stderr: {stderr_text}")
+            return [], f"error (exit code {result.returncode})"
         data = json.loads(stdout)
         findings = []
         severity_map = {"ERROR": Severity.HIGH, "WARNING": Severity.MEDIUM, "INFO": Severity.LOW}
@@ -112,26 +140,28 @@ def run_semgrep(
                 message=r["extra"]["message"],
             ))
         logger.info(f"Semgrep found {len(findings)} issue(s)")
-        return findings
+        return findings, f"{len(findings)} finding(s)"
     except subprocess.TimeoutExpired:
         logger.error("Semgrep timed out")
-        return []
+        return [], "timed out"
+    except FileNotFoundError:
+        return [], "not installed"
     except Exception as e:
         logger.error(f"Semgrep failed: {e}")
-        return []
+        return [], f"error ({e})"
 
 
-def run_devskim(repo_path: str, files: list[str]) -> list[Finding]:
-    """Run DevSkim on repo_path. Returns [] if DevSkim is not installed or fails."""
+def run_devskim(repo_path: str, files: list[str]) -> tuple[list[Finding], str]:
+    """Run DevSkim on repo_path. Returns ([], status) if not installed or fails."""
     if not files:
-        return []
+        return [], "skipped (no files)"
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".sarif", delete=False) as tmp:
             tmp_path = tmp.name
         result = subprocess.run(
             [
-                "devskim", "analyze",
+                _find_tool("devskim"), "analyze",
                 "--source-code", repo_path,
                 "--output-file", tmp_path,
                 "--output-format", "Sarif",
@@ -139,17 +169,19 @@ def run_devskim(repo_path: str, files: list[str]) -> list[Finding]:
             capture_output=True, timeout=60,
         )
         if result.returncode not in (0, 1):
-            return []
+            return [], f"error (exit code {result.returncode})"
         with open(tmp_path, encoding="utf-8") as fh:
             sarif_data = json.load(fh)
         findings = _parse_sarif(sarif_data, FindingSource.DEVSKIM, files, repo_path)
         logger.info(f"DevSkim found {len(findings)} issue(s)")
-        return findings
+        return findings, f"{len(findings)} finding(s)"
     except FileNotFoundError:
-        return []  # devskim not installed
+        return [], "not installed (dotnet tool install -g Microsoft.CST.DevSkim.CLI)"
+    except subprocess.TimeoutExpired:
+        return [], "timed out"
     except Exception as e:
         logger.warning(f"DevSkim skipped: {e}")
-        return []
+        return [], f"error ({e})"
     finally:
         if tmp_path:
             try:
@@ -158,10 +190,10 @@ def run_devskim(repo_path: str, files: list[str]) -> list[Finding]:
                 pass
 
 
-def run_roslyn_build(repo_path: str, files: list[str]) -> list[Finding]:
-    """Try dotnet build with Roslyn analyzers. Returns [] if no project found or build fails."""
+def run_roslyn_build(repo_path: str, files: list[str]) -> tuple[list[Finding], str]:
+    """Try dotnet build with Roslyn analyzers. Returns ([], status) if no project or fails."""
     if not files:
-        return []
+        return [], "skipped (no files)"
     project_file = None
     for pattern in ["*.sln", "**/*.sln", "*.csproj", "**/*.csproj"]:
         matches = sorted(Path(repo_path).glob(pattern))
@@ -169,7 +201,7 @@ def run_roslyn_build(repo_path: str, files: list[str]) -> list[Finding]:
             project_file = str(matches[0])
             break
     if not project_file:
-        return []
+        return [], "skipped (no .sln/.csproj found)"
     try:
         result = subprocess.run(
             [
@@ -202,15 +234,78 @@ def run_roslyn_build(repo_path: str, files: list[str]) -> list[Finding]:
                 message=message.strip(),
             ))
         logger.info(f"Roslyn build found {len(findings)} issue(s)")
-        return findings
+        return findings, f"{len(findings)} finding(s)"
     except FileNotFoundError:
-        return []  # dotnet not installed
+        return [], "not installed (requires .NET SDK)"
     except subprocess.TimeoutExpired:
         logger.warning("Roslyn build timed out")
-        return []
+        return [], "timed out"
     except Exception as e:
         logger.warning(f"Roslyn build skipped: {e}")
-        return []
+        return [], f"error ({e})"
+
+
+def run_gitleaks(repo_path: str, files: list[str]) -> tuple[list[Finding], str]:
+    """Run Gitleaks to detect secrets/credentials. Returns ([], status) if not installed."""
+    if not files:
+        return [], "skipped (no files)"
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+            tmp_path = tmp.name
+        result = subprocess.run(
+            [
+                _find_tool("gitleaks"), "detect",
+                "--source", repo_path,
+                "--report-format", "json",
+                "--report-path", tmp_path,
+                "--no-git",
+            ],
+            capture_output=True, timeout=120,
+        )
+        # gitleaks: exit 0 = no leaks, exit 1 = leaks found, others = error
+        if result.returncode not in (0, 1):
+            return [], f"error (exit code {result.returncode})"
+        with open(tmp_path, encoding="utf-8") as fh:
+            content = fh.read().strip()
+        if not content or content == "[]":
+            return [], "0 finding(s)"
+        data = json.loads(content)
+        findings = []
+        file_set = set(f.replace("\\", "/") for f in files)
+        for leak in data:
+            leak_file = leak.get("File", "").replace("\\", "/")
+            # Match against our target files
+            matched = None
+            for f in file_set:
+                if leak_file.endswith("/" + f) or leak_file == f:
+                    matched = f.replace("/", "\\") if "\\" in files[0] else f
+                    break
+            if matched is None:
+                continue
+            findings.append(Finding(
+                file=matched,
+                line=leak.get("StartLine", 1),
+                severity=Severity.CRITICAL,
+                source=FindingSource.GITLEAKS,
+                rule_id=leak.get("RuleID", "secret-detected"),
+                message=f"Secret detected: {leak.get('Description', 'potential secret/credential')}",
+            ))
+        logger.info(f"Gitleaks found {len(findings)} issue(s)")
+        return findings, f"{len(findings)} finding(s)"
+    except FileNotFoundError:
+        return [], "not installed"
+    except subprocess.TimeoutExpired:
+        return [], "timed out"
+    except Exception as e:
+        logger.warning(f"Gitleaks skipped: {e}")
+        return [], f"error ({e})"
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def filter_to_changed_files(
