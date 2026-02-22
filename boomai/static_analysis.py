@@ -124,9 +124,16 @@ def run_semgrep(
         if result.returncode not in (0, 1):
             stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
             if stderr_text:
-                logger.error(f"Semgrep stderr: {stderr_text}")
-            return [], f"error (exit code {result.returncode})"
-        data = json.loads(stdout)
+                logger.warning(f"Semgrep stderr: {stderr_text}")
+            # Try parsing JSON anyway — warnings can cause exit code 2
+            try:
+                data = json.loads(stdout)
+                if "results" not in data:
+                    return [], f"error (exit code {result.returncode})"
+            except (json.JSONDecodeError, ValueError):
+                return [], f"error (exit code {result.returncode})"
+        else:
+            data = json.loads(stdout)
         findings = []
         severity_map = {"ERROR": Severity.HIGH, "WARNING": Severity.MEDIUM, "INFO": Severity.LOW}
         for r in data.get("results", []):

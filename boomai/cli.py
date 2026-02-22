@@ -2,10 +2,9 @@
 BoomAI CLI — AI-powered code review tool
 
 Usage (from inside your project):
-  boom-ai scan                          # full codebase scan
-  boom-ai scan --apply                  # scan + auto-apply fixes
-  boom-ai review analytics development  # diff-based review
-  boom-ai apply-all analytics development
+  boom-ai scan                    # full codebase scan
+  boom-ai scan --apply            # scan + auto-apply fixes
+  boom-ai scan --comments --apply # scan + apply with inline comments
   boom-ai setup dgodolias/QuaR --branch development
 """
 
@@ -20,7 +19,6 @@ import tempfile
 from pathlib import Path
 
 from boomai.config import settings
-from boomai.gemini_review import review_with_gemini
 from boomai.languages import detect_languages, filter_reviewable_files
 from boomai.models import ReviewSummary
 from boomai.static_analysis import run_semgrep, run_devskim, run_roslyn_build, run_gitleaks
@@ -42,29 +40,6 @@ BOOMAI_EXCLUDES = [
 # ============================================================
 #  Git helpers
 # ============================================================
-
-def git_changed_files(base: str, head: str, repo_path: str = ".",
-                      exclude: list[str] | None = None) -> list[str]:
-    cmd = ["git", "diff", "--name-only", f"{base}...{head}"]
-    if exclude:
-        cmd.extend(["--", ".", *[f":(exclude){p}" for p in exclude]])
-    result = subprocess.run(
-        cmd, capture_output=True, check=True, cwd=repo_path,
-    )
-    output = result.stdout.decode("utf-8", errors="replace")
-    return [f.strip() for f in output.strip().splitlines() if f.strip()]
-
-
-def git_diff(base: str, head: str, repo_path: str = ".",
-             exclude: list[str] | None = None) -> str:
-    cmd = ["git", "diff", f"{base}...{head}"]
-    if exclude:
-        cmd.extend(["--", ".", *[f":(exclude){p}" for p in exclude]])
-    result = subprocess.run(
-        cmd, capture_output=True, check=True, cwd=repo_path,
-    )
-    return result.stdout.decode("utf-8", errors="replace")
-
 
 def gh(*args) -> str:
     """Run gh CLI command and return stdout."""
@@ -347,95 +322,6 @@ def cmd_setup(args):
 
 
 # ============================================================
-#  Command: review / apply-all / apply
-# ============================================================
-
-async def run_local_review(base: str, head: str, repo_path: str = ".",
-                           exclude: list[str] | None = None) -> ReviewSummary:
-    print(f"\n  Comparing {head} -> {base}")
-    if repo_path != ".":
-        print(f"  Repo: {repo_path}")
-    if exclude:
-        print(f"  Excluding: {', '.join(exclude)}")
-
-    all_files = git_changed_files(base, head, repo_path, exclude=exclude)
-    reviewable = filter_reviewable_files(all_files)
-    languages = detect_languages(all_files)
-    print(f"  {len(all_files)} files changed, {len(reviewable)} reviewable")
-    print(f"  Languages: {', '.join(languages)}")
-
-    print(f"  Running static analysis...")
-    findings = []
-    if reviewable:
-        semgrep_findings, semgrep_status = run_semgrep(reviewable, languages)
-        print(f"  Semgrep: {semgrep_status}")
-        findings.extend(semgrep_findings)
-        devskim_findings, devskim_status = run_devskim(repo_path, reviewable)
-        print(f"  DevSkim: {devskim_status}")
-        findings.extend(devskim_findings)
-        roslyn_findings, roslyn_status = run_roslyn_build(repo_path, reviewable)
-        print(f"  Roslyn: {roslyn_status}")
-        findings.extend(roslyn_findings)
-        gitleaks_findings, gitleaks_status = run_gitleaks(repo_path, reviewable)
-        print(f"  Gitleaks: {gitleaks_status}")
-        findings.extend(gitleaks_findings)
-
-    diff = git_diff(base, head, repo_path, exclude=exclude) or ""
-    print(f"  Diff size: {len(diff)} chars")
-
-    print(f"  Sending to Gemini ({settings.llm_model})...")
-    return await review_with_gemini(
-        diff=diff,
-        findings=findings,
-        changed_files=[{"filename": f} for f in reviewable],
-        detected_languages=languages,
-    )
-
-
-def _build_excludes(args) -> list[str] | None:
-    excludes = []
-    if not getattr(args, "no_auto_exclude", False):
-        excludes.extend(BOOMAI_EXCLUDES)
-    if getattr(args, "exclude", None):
-        excludes.extend(args.exclude)
-    return excludes or None
-
-
-def cmd_review(args):
-    require_api_key()
-    repo_path = os.path.abspath(args.path)
-    exclude = _build_excludes(args)
-    review = asyncio.run(run_local_review(args.base, args.head, repo_path, exclude=exclude))
-    print_review(review)
-
-
-def cmd_apply_all(args):
-    require_api_key()
-    repo_path = os.path.abspath(args.path)
-    exclude = _build_excludes(args)
-    review = asyncio.run(run_local_review(args.base, args.head, repo_path, exclude=exclude))
-    print_review(review)
-
-    print(f"  Applying all fixes locally (no commit)...")
-    count = apply_local(review.findings, repo_path)
-    print(f"\n  Done! {count} fix(es) applied. Run `git diff` to see changes.")
-
-
-def cmd_apply(args):
-    require_api_key()
-    repo_path = os.path.abspath(args.path)
-    exclude = _build_excludes(args)
-    review = asyncio.run(run_local_review(args.base, args.head, repo_path, exclude=exclude))
-    print_review(review)
-
-    file_filter = getattr(args, "file", None)
-    label = f"fixes for {file_filter}" if file_filter else "all fixes"
-    print(f"  Applying {label} locally (no commit)...")
-    count = apply_local(review.findings, repo_path, file_filter)
-    print(f"\n  Done! {count} fix(es) applied. Run `git diff` to see changes.")
-
-
-# ============================================================
 #  Command: scan
 # ============================================================
 
@@ -497,7 +383,9 @@ def read_file_contents(
 
 async def run_local_scan(repo_path: str = ".",
                          exclude: list[str] | None = None,
-                         include: list[str] | None = None) -> ReviewSummary:
+                         include: list[str] | None = None,
+                         comments: bool = False,
+                         on_chunk_done=None) -> ReviewSummary:
     """Scan entire codebase and return AI review."""
     from boomai.gemini_review import scan_with_gemini
 
@@ -567,10 +455,16 @@ async def run_local_scan(repo_path: str = ".",
     print(f"  Total source: {total_chars:,} chars across {len(file_contents)} files")
     print(f"  Sending to Gemini ({settings.llm_model})...")
 
+    def _progress(msg: str) -> None:
+        print(f"  {msg}")
+
     return await scan_with_gemini(
         file_contents=file_contents,
         findings=findings,
         detected_languages=languages,
+        comments=comments,
+        on_progress=_progress,
+        on_chunk_done=on_chunk_done,
     )
 
 
@@ -582,14 +476,26 @@ def cmd_scan(args):
     if getattr(args, "exclude", None):
         exclude.extend(args.exclude)
     include = getattr(args, "include", None)
+    comments = getattr(args, "comments", False) or settings.scan_comments
+    do_apply = getattr(args, "apply", False)
 
-    review = asyncio.run(run_local_scan(repo_path, exclude=exclude, include=include))
+    # Incremental apply: fix each chunk's findings as soon as it completes
+    applied_total = 0
+
+    def _on_chunk_done(chunk_review):
+        nonlocal applied_total
+        if chunk_review.findings:
+            count = apply_local(chunk_review.findings, repo_path)
+            applied_total += count
+
+    review = asyncio.run(run_local_scan(
+        repo_path, exclude=exclude, include=include, comments=comments,
+        on_chunk_done=_on_chunk_done if do_apply else None,
+    ))
     print_review(review)
 
-    if getattr(args, "apply", False) and review.findings:
-        print(f"  Applying all fixes locally (no commit)...")
-        count = apply_local(review.findings, repo_path)
-        print(f"\n  Done! {count} fix(es) applied. Run `git diff` to see changes.")
+    if do_apply and applied_total:
+        print(f"\n  Done! {applied_total} fix(es) applied. Run `git diff` to see changes.")
 
 
 # ============================================================
@@ -959,9 +865,8 @@ def main():
 Examples (run from inside your project):
   boom-ai scan                    # full codebase scan
   boom-ai scan --apply            # scan + auto-apply fixes
+  boom-ai scan --comments --apply # scan + apply with inline comments
   boom-ai scan --include src/     # scan only src/
-  boom-ai review analytics development
-  boom-ai apply-all analytics development
   boom-ai setup dgodolias/QuaR --branch development
 """,
     )
@@ -972,34 +877,6 @@ Examples (run from inside your project):
     p_setup.add_argument("repo", help="owner/repo")
     p_setup.add_argument("--branch", default="main", help="Base branch (default: main)")
 
-    # --- review ---
-    p_review = sub.add_parser("review", help="Review code between branches")
-    p_review.add_argument("head", help="Branch being reviewed")
-    p_review.add_argument("base", help="Merge target branch")
-    p_review.add_argument("--path", default=".", help="Path to repo (default: current dir)")
-    p_review.add_argument("--exclude", nargs="+", help="Exclude paths")
-    p_review.add_argument("--no-auto-exclude", action="store_true",
-                          help="Don't auto-exclude BoomAI files")
-
-    # --- apply-all ---
-    p_apply_all = sub.add_parser("apply-all", help="Review + apply ALL fixes locally (no commit)")
-    p_apply_all.add_argument("head", help="Branch being reviewed")
-    p_apply_all.add_argument("base", help="Merge target branch")
-    p_apply_all.add_argument("--path", default=".", help="Path to repo (default: current dir)")
-    p_apply_all.add_argument("--exclude", nargs="+", help="Exclude paths")
-    p_apply_all.add_argument("--no-auto-exclude", action="store_true",
-                             help="Don't auto-exclude BoomAI files")
-
-    # --- apply ---
-    p_apply = sub.add_parser("apply", help="Review + apply fixes for specific file")
-    p_apply.add_argument("head", help="Branch being reviewed")
-    p_apply.add_argument("base", help="Merge target branch")
-    p_apply.add_argument("--file", help="Apply fixes only for this file")
-    p_apply.add_argument("--path", default=".", help="Path to repo (default: current dir)")
-    p_apply.add_argument("--exclude", nargs="+", help="Exclude paths")
-    p_apply.add_argument("--no-auto-exclude", action="store_true",
-                          help="Don't auto-exclude BoomAI files")
-
     # --- scan ---
     p_scan = sub.add_parser("scan", help="Scan entire codebase for issues (no branches needed)")
     p_scan.add_argument("--path", default=".", help="Path to repo (default: current dir)")
@@ -1007,6 +884,8 @@ Examples (run from inside your project):
     p_scan.add_argument("--include", nargs="+", help="Only scan these paths (e.g., src/ lib/)")
     p_scan.add_argument("--apply", action="store_true",
                         help="Automatically apply all fixable suggestions")
+    p_scan.add_argument("--comments", action="store_true",
+                        help="Add inline comments explaining each fix")
 
     # --- install-tools ---
     p_tools = sub.add_parser("install-tools", help="Check & install static analysis tools")
@@ -1037,12 +916,6 @@ Examples (run from inside your project):
 
     if args.command == "setup":
         cmd_setup(args)
-    elif args.command == "review":
-        cmd_review(args)
-    elif args.command == "apply-all":
-        cmd_apply_all(args)
-    elif args.command == "apply":
-        cmd_apply(args)
     elif args.command == "scan":
         cmd_scan(args)
     elif args.command == "install-tools":

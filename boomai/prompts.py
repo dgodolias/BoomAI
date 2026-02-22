@@ -159,7 +159,7 @@ def build_user_message(
 #  Full-codebase scan prompts
 # ============================================================
 
-def build_scan_system_prompt(detected_languages: list[str]) -> str:
+def build_scan_system_prompt(detected_languages: list[str], comments: bool = False) -> str:
     """Build system prompt for full-codebase scan mode."""
     lang_configs = [LANGUAGES[k] for k in detected_languages if k in LANGUAGES]
     lang_names = (
@@ -231,6 +231,15 @@ def build_scan_system_prompt(detected_languages: list[str]) -> str:
         '- To DELETE dead/duplicate code, provide old_code and set suggestion to an empty string ("")',
         "- If a fix requires very large restructuring (more than ~30 lines), describe it in `message` and OMIT old_code/suggestion",
         "- If you cannot provide an exact fix, omit both old_code and suggestion",
+    ])
+
+    if comments:
+        parts.append("- Add a SHORT inline comment (e.g., `// BoomAI: fixed resource leak`) "
+                     "on the FIRST changed line of each suggestion to explain the fix")
+    else:
+        parts.append("- Do NOT add any comments or annotations to the suggestion code")
+
+    parts.extend([
         "",
         "- Keep findings focused and actionable (max 30 per chunk)",
         "- Review EVERY file systematically — do not skip any. Distribute attention evenly across all files.",

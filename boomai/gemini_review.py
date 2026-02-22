@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from typing import Callable
 
 import httpx
 
@@ -425,9 +426,10 @@ async def _scan_chunk(
     findings: list[Finding],
     detected_languages: list[str],
     chunk_info: str = "",
+    comments: bool = False,
 ) -> ReviewSummary:
     """Send a single chunk of files to Gemini for scan review."""
-    system_prompt = build_scan_system_prompt(detected_languages)
+    system_prompt = build_scan_system_prompt(detected_languages, comments=comments)
 
     # Filter findings to only files in this chunk
     chunk_files = {path for path, _ in file_contents}
@@ -492,31 +494,63 @@ async def scan_with_gemini(
     file_contents: list[tuple[str, str]],
     findings: list[Finding],
     detected_languages: list[str] | None = None,
+    comments: bool = False,
+    on_progress: Callable[[str], None] | None = None,
+    on_chunk_done: Callable[[ReviewSummary], None] | None = None,
 ) -> ReviewSummary:
-    """Send full file contents + static findings to Gemini for codebase scan."""
+    """Send full file contents + static findings to Gemini for codebase scan.
+
+    on_chunk_done is called with each chunk's ReviewSummary as soon as it
+    completes, enabling incremental apply (chunks have disjoint file sets).
+    """
     if detected_languages is None:
         detected_languages = []
 
+    def _emit(msg: str) -> None:
+        if on_progress:
+            on_progress(msg)
+
     # Try LLM-planned chunks first, fall back to greedy
+    _emit("Planning review chunks...")
     chunks = await _plan_chunks(
         file_contents, detected_languages, settings.max_scan_chars,
     )
     if chunks is None:
         chunks = _chunk_files(file_contents, settings.max_scan_chars)
+    _emit(f"{len(chunks)} chunk(s) planned")
 
     if len(chunks) == 1:
-        return await _scan_chunk(chunks[0], findings, detected_languages)
+        _emit(f"Reviewing 1 chunk ({len(chunks[0])} files)...")
+        result = await _scan_chunk(
+            chunks[0], findings, detected_languages, comments=comments,
+        )
+        _emit(f"Done — {len(result.findings)} issues found")
+        if on_chunk_done:
+            on_chunk_done(result)
+        return result
 
     # Multiple chunks — call Gemini concurrently, merge results
     sem = asyncio.Semaphore(3)
+    completed = 0
 
-    async def _scan_with_sem(chunk: list[tuple[str, str]], info: str) -> ReviewSummary:
+    async def _scan_with_sem(
+        chunk: list[tuple[str, str]], info: str, idx: int,
+    ) -> ReviewSummary:
+        nonlocal completed
         async with sem:
-            logger.info(f"Scanning {info} ({len(chunk)} files)")
-            return await _scan_chunk(chunk, findings, detected_languages, info)
+            _emit(f"Reviewing chunk {idx}/{len(chunks)} ({len(chunk)} files)...")
+            result = await _scan_chunk(
+                chunk, findings, detected_languages, info, comments=comments,
+            )
+            completed += 1
+            _emit(f"Chunk {idx}/{len(chunks)} done — "
+                  f"{len(result.findings)} issues ({completed}/{len(chunks)} complete)")
+            if on_chunk_done:
+                on_chunk_done(result)
+            return result
 
     tasks = [
-        _scan_with_sem(chunk, f"Chunk {i} of {len(chunks)}")
+        _scan_with_sem(chunk, f"Chunk {i} of {len(chunks)}", i)
         for i, chunk in enumerate(chunks, 1)
     ]
     results = await asyncio.gather(*tasks)

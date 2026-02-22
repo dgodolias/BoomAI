@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     scan_max_files: int = 1000
     scan_output_tokens: int = 65536
     scan_timeout: float = 600.0
+    scan_comments: bool = False
 
     # Scan planning (repo-map phase)
     plan_output_tokens: int = 32768
