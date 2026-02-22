@@ -55,6 +55,9 @@ LANGUAGES: dict[str, LanguageConfig] = {
             "SynchronizationContext.CreateCopy() returning `this` instead of a new instance — all async operations that capture-and-restore context share one dispatch queue, causing cross-task contamination; CreateCopy() must return `new DerivedContext()` with its own isolated state",
             "Static fields (SpinLock, queues, counts) used as per-instance state in a SynchronizationContext or similar per-instance class create a hidden global singleton — all instances share one lock and one action queue, so callbacks posted to different context instances race each other and execute in the wrong context",
             "Catch-and-swallow inside error-reporting callbacks: bare `catch { }` or `catch (Exception) { }` wrapped around `unhandledExceptionCallback(ex)` or error-handler invocations silently discards failures inside the error handler itself — lock corruption, null refs, and handler bugs become invisible and undebuggable",
+            "Pooled promise cancellation-path resource leak: `GetResult` skips `TryReturn()` when `cancelImmediately && token.IsCancellationRequested`, leaving the `CancellationTokenRegistration` undisposed and the object permanently leaked from the pool — always dispose registrations and return to pool in ALL exit paths, not just the success path",
+            "CancellationTokenSource wrapped in a disposable that calls `Cancel()` but never `Dispose()` — `CancellationTokenSource` holds internal kernel handles on some runtimes; wrappers must call both `cts.Cancel()` and `cts.Dispose()` on cleanup to avoid native resource leaks",
+            "Sequential `DisposeAsync` loop over multiple `IAsyncDisposable` items without per-item try-finally — if one `DisposeAsync()` throws, remaining items are never disposed and rented buffers (ArrayPool) are never returned; wrap each disposal in its own try-catch or aggregate exceptions",
         ],
     ),
 }
