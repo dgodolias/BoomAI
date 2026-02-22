@@ -44,6 +44,9 @@ LANGUAGES: dict[str, LanguageConfig] = {
             "Threading safety issues",
             "Coroutine misuse (StartCoroutine on disabled objects)",
             "Missing null checks on Unity object references",
+            "Event handler asymmetry: `+=` added in Register/Add method but `-=` missing in the paired Unregister/Remove method — causes double invocation after Stop+Start or scene reload cycles",
+            "Collection pre-allocated from network-provided element count without bytes-available guard (`new List<T>(networkLength)`) — element-count limit allows multi-GB allocation if T is a large struct",
+            "NetworkReader position desync: skipping a component's dirty bit without consuming its serialized bytes — subsequent components deserialize corrupt data",
         ],
     ),
     "typescript": LanguageConfig(
