@@ -12,6 +12,7 @@ class Severity(str, Enum):
 
 class FindingSource(str, Enum):
     SEMGREP = "semgrep"
+    DEVSKIM = "devskim"
     ROSLYN = "roslyn"
     AI = "ai"
 

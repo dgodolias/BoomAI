@@ -11,6 +11,8 @@ from scripts.github_client import GitHubClient
 from scripts.languages import detect_languages, filter_reviewable_files
 from scripts.static_analysis import (
     run_semgrep,
+    run_devskim,
+    run_roslyn_build,
     filter_to_changed_files,
     prioritize_findings,
 )
@@ -51,14 +53,17 @@ async def run_review():
         logger.info("No reviewable files, exiting")
         return
 
-    # 3. Run static analysis (language-aware)
+    # 3. Run all static analysis tools (fail-safe — skip unavailable tools)
     logger.info("Running static analysis...")
-    semgrep_findings = run_semgrep(reviewable_files, detected_languages)
-    semgrep_findings = filter_to_changed_files(semgrep_findings, filenames)
-    top_findings = prioritize_findings(semgrep_findings, settings.max_findings)
+    all_findings = []
+    all_findings.extend(run_semgrep(reviewable_files, detected_languages))
+    all_findings.extend(run_devskim(".", reviewable_files))
+    all_findings.extend(run_roslyn_build(".", reviewable_files))
+    all_findings = filter_to_changed_files(all_findings, filenames)
+    top_findings = prioritize_findings(all_findings, settings.max_findings)
 
     logger.info(
-        f"Static analysis: {len(semgrep_findings)} total, "
+        f"Static analysis: {len(all_findings)} total, "
         f"{len(top_findings)} selected for AI review"
     )
 

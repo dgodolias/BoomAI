@@ -23,7 +23,7 @@ from boomai.config import settings
 from boomai.gemini_review import review_with_gemini
 from boomai.languages import detect_languages, filter_reviewable_files
 from boomai.models import ReviewSummary
-from boomai.static_analysis import run_semgrep
+from boomai.static_analysis import run_semgrep, run_devskim, run_roslyn_build
 
 logger = logging.getLogger(__name__)
 
@@ -349,12 +349,21 @@ async def run_local_review(base: str, head: str, repo_path: str = ".",
     print(f"  Languages: {', '.join(languages)}")
 
     print(f"  Running static analysis...")
-    try:
-        findings = run_semgrep(reviewable, languages) if reviewable else []
-        print(f"  Semgrep: {len(findings)} finding(s)")
-    except Exception:
-        findings = []
-        print(f"  Semgrep skipped (not available locally)")
+    findings = []
+    if reviewable:
+        try:
+            findings.extend(run_semgrep(reviewable, languages))
+            print(f"  Semgrep: {len(findings)} finding(s)")
+        except Exception:
+            print(f"  Semgrep skipped (not available locally)")
+        devskim = run_devskim(repo_path, reviewable)
+        if devskim:
+            print(f"  DevSkim: {len(devskim)} finding(s)")
+        findings.extend(devskim)
+        roslyn = run_roslyn_build(repo_path, reviewable)
+        if roslyn:
+            print(f"  Roslyn: {len(roslyn)} finding(s)")
+        findings.extend(roslyn)
 
     diff = git_diff(base, head, repo_path, exclude=exclude) or ""
     print(f"  Diff size: {len(diff)} chars")
@@ -510,7 +519,7 @@ async def run_local_scan(repo_path: str = ".",
             has_critical=False,
         )
 
-    # Run Semgrep on ALL reviewable files (in batches)
+    # Run all static analysis tools in parallel (fail-safe)
     print(f"  Running static analysis...")
     SEMGREP_BATCH = 50
     findings = []
@@ -518,9 +527,18 @@ async def run_local_scan(repo_path: str = ".",
         for i in range(0, len(reviewable), SEMGREP_BATCH):
             batch = reviewable[i:i + SEMGREP_BATCH]
             findings.extend(run_semgrep(batch, languages))
-        print(f"  Semgrep: {len(findings)} finding(s)")
+        if findings:
+            print(f"  Semgrep: {len(findings)} finding(s)")
     except Exception:
         print(f"  Semgrep skipped (not available locally)")
+    devskim = run_devskim(repo_path, reviewable)
+    if devskim:
+        print(f"  DevSkim: {len(devskim)} finding(s)")
+    findings.extend(devskim)
+    roslyn = run_roslyn_build(repo_path, reviewable)
+    if roslyn:
+        print(f"  Roslyn: {len(roslyn)} finding(s)")
+    findings.extend(roslyn)
 
     # Read file contents
     file_contents = read_file_contents(reviewable, repo_path)
