@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     max_diff_chars: int = 250_000
 
     # Scan settings (full-codebase mode)
-    max_scan_chars: int = 1_500_000
+    max_scan_chars: int = 400_000
     scan_max_files: int = 1000
     scan_output_tokens: int = 65536
     scan_timeout: float = 600.0

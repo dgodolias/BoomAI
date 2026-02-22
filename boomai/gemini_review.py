@@ -269,8 +269,8 @@ def _chunk_files(
     current_chunk: list[tuple[str, str]] = []
     current_size = 0
 
-    # Sort smallest first to maximise files per chunk
-    sorted_files = sorted(file_contents, key=lambda x: len(x[1]))
+    # Sort largest first — complex files get maximum LLM attention
+    sorted_files = sorted(file_contents, key=lambda x: len(x[1]), reverse=True)
 
     for path, content in sorted_files:
         file_size = len(content) + len(path) + 20  # header overhead
@@ -369,15 +369,24 @@ async def scan_with_gemini(
     if len(chunks) == 1:
         return await _scan_chunk(chunks[0], findings, detected_languages)
 
-    # Multiple chunks — call Gemini for each, merge results
+    # Multiple chunks — call Gemini concurrently, merge results
+    sem = asyncio.Semaphore(3)
+
+    async def _scan_with_sem(chunk: list[tuple[str, str]], info: str) -> ReviewSummary:
+        async with sem:
+            logger.info(f"Scanning {info} ({len(chunk)} files)")
+            return await _scan_chunk(chunk, findings, detected_languages, info)
+
+    tasks = [
+        _scan_with_sem(chunk, f"Chunk {i} of {len(chunks)}")
+        for i, chunk in enumerate(chunks, 1)
+    ]
+    results = await asyncio.gather(*tasks)
+
     all_findings: list[ReviewComment] = []
     summaries: list[str] = []
     total_critical = 0
-
-    for i, chunk in enumerate(chunks, 1):
-        chunk_info = f"Chunk {i} of {len(chunks)}"
-        logger.info(f"Scanning {chunk_info} ({len(chunk)} files)")
-        result = await _scan_chunk(chunk, findings, detected_languages, chunk_info)
+    for result in results:
         all_findings.extend(result.findings)
         summaries.append(result.summary)
         total_critical += result.critical_count
