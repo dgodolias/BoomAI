@@ -47,6 +47,10 @@ LANGUAGES: dict[str, LanguageConfig] = {
             "Event handler asymmetry: `+=` added in Register/Add method but `-=` missing in the paired Unregister/Remove method — causes double invocation after Stop+Start or scene reload cycles",
             "Collection pre-allocated from network-provided element count without bytes-available guard (`new List<T>(networkLength)`) — element-count limit allows multi-GB allocation if T is a large struct",
             "NetworkReader position desync: skipping a component's dirty bit without consuming its serialized bytes — subsequent components deserialize corrupt data",
+            "`async void` in Unity lifecycle methods (Awake/Start/OnDestroy/OnEnable/OnDisable) — Unity gets control back immediately; any continuation that resumes after the object is destroyed accesses null/destroyed references and throws unhandled exceptions",
+            "Unity `Invoke(nameof(Method), delay)` with an `async Task` method — Invoke discards the returned Task, so exceptions are silently swallowed, the async work runs with no awaiter, and there is no cancellation path; use a coroutine or store and await the Task instead",
+            "Anonymous lambda subscribed to an external C# event without storing the delegate reference (`event += (a, b) => Method()`) — the anonymous delegate cannot be unsubscribed later; the subscription persists permanently even after the subscriber is destroyed, causing memory leaks and stale callbacks after scene reload",
+            "`Stream.Read(buffer, 0, count)` return value ignored — `Read()` may return fewer bytes than requested (valid for file and network streams); without looping until all bytes are consumed or using `BinaryReader.ReadBytes()`, subsequent parsing silently operates on partial/corrupt data",
         ],
     ),
 }
