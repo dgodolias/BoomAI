@@ -14,34 +14,23 @@ class Settings(BaseSettings):
     max_output_tokens: int = 32768
     llm_timeout: float = 300.0
 
-    # GitHub
-    github_token: str = ""
-    github_repository: str = ""
-    pr_number: int = 0
-
-    # Slack
-    slack_webhook_url: str = ""
-    slack_enabled: bool = True
-
-    # Review settings
-    max_findings: int = 20
-    max_diff_chars: int = 250_000
-
     # Scan settings (full-codebase mode)
-    max_scan_chars: int = 400_000
-    scan_max_files: int = 1000
+    max_scan_chars: int = 200_000
+    scan_max_files: int = 1500
     scan_output_tokens: int = 65536
-    scan_timeout: float = 600.0
+    scan_timeout: float = 180.0
     scan_comments: bool = False
+    scan_explanations: bool = True
 
     # Scan planning (repo-map phase)
     plan_output_tokens: int = 32768
-    plan_timeout: float = 300.0
+    plan_timeout: float = 90.0
 
     model_config = {
         "env_file": (".env", str(_global_env)),
         "env_file_encoding": "utf-8",
         "env_prefix": "BOOMAI_",
+        "extra": "ignore",
     }
 
 

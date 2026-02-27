@@ -5,13 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "boom-ai"
 version = "0.1.0"
-description = "AI-powered code review tool using Gemini"
+description = "AI-powered code fixer using Gemini"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.28,<1",
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.7,<3",
-    "PyGithub>=2.5,<3",
     "PyYAML>=6.0,<7",
 ]
 

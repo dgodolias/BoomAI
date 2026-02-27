@@ -90,16 +90,21 @@ def _parse_sarif(
 
 
 def run_semgrep(
-    changed_files: list[str], detected_languages: list[str]
+    repo_path: str, detected_languages: list[str], files: list[str]
 ) -> tuple[list[Finding], str]:
-    """Run Semgrep with appropriate rulesets based on detected languages."""
-    if not changed_files:
+    """Run Semgrep once on the repo directory with --include for extensions.
+
+    Runs a single Semgrep invocation with --quiet to suppress progress/summary
+    noise. Uses --include patterns to limit scanning to reviewable extensions.
+    """
+    if not files:
         logger.info("No reviewable files, skipping Semgrep")
         return [], "skipped (no files)"
 
     rules_dir = Path(__file__).parent / "data" / "semgrep"
 
     config_args = []
+    include_args = []
     for lang_key in detected_languages:
         config = LANGUAGES.get(lang_key)
         if not config:
@@ -110,35 +115,49 @@ def run_semgrep(
             custom_path = rules_dir / config.custom_rules_file
             if custom_path.exists():
                 config_args.extend(["--config", str(custom_path)])
+        for ext in config.extensions:
+            include_args.extend(["--include", f"*{ext}"])
 
     if not config_args:
         logger.info("No Semgrep rulesets for detected languages, skipping")
         return [], "skipped (no rulesets for detected languages)"
 
-    cmd = ["semgrep", *config_args, "--json", "--no-git-ignore"] + changed_files
+    cmd = ["semgrep", *config_args, "--json", "--quiet", *include_args, repo_path]
 
     try:
         env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-        result = subprocess.run(cmd, capture_output=True, timeout=120, env=env)
+        result = subprocess.run(cmd, capture_output=True, timeout=300, env=env)
         stdout = result.stdout.decode("utf-8", errors="replace")
-        if result.returncode not in (0, 1):
+
+        # Exit codes: 0 = clean, 1 = findings, 2 = warnings (still has valid JSON)
+        if result.returncode not in (0, 1, 2):
             stderr_text = result.stderr.decode("utf-8", errors="replace").strip()
             if stderr_text:
-                logger.warning(f"Semgrep stderr: {stderr_text}")
-            # Try parsing JSON anyway — warnings can cause exit code 2
-            try:
-                data = json.loads(stdout)
-                if "results" not in data:
-                    return [], f"error (exit code {result.returncode})"
-            except (json.JSONDecodeError, ValueError):
-                return [], f"error (exit code {result.returncode})"
-        else:
+                logger.warning(f"Semgrep error: {stderr_text[:200]}")
+            return [], f"error (exit code {result.returncode})"
+
+        try:
             data = json.loads(stdout)
+        except (json.JSONDecodeError, ValueError):
+            return [], "error (invalid JSON output)"
+
+        # Build a set of reviewable file paths for filtering
+        file_set = set(f.replace("\\", "/") for f in files)
+
         findings = []
         severity_map = {"ERROR": Severity.HIGH, "WARNING": Severity.MEDIUM, "INFO": Severity.LOW}
         for r in data.get("results", []):
+            path = r["path"].replace("\\", "/")
+            # Filter to only files in our reviewable set
+            matched = None
+            for f in file_set:
+                if path == f or path.endswith("/" + f):
+                    matched = f
+                    break
+            if matched is None:
+                continue
             findings.append(Finding(
-                file=r["path"],
+                file=matched,
                 line=r["start"]["line"],
                 end_line=r["end"]["line"],
                 severity=severity_map.get(r["extra"]["severity"], Severity.MEDIUM),

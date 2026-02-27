@@ -44,122 +44,23 @@ _SECURITY_PATTERNS = [
     "- Is CORS configured with unvalidated env var origins?",
     "- Are list endpoints missing pagination? (memory exhaustion at scale)",
     "- Is error response format consistent across all routes? (`{ error }` vs `{ message }` vs `{ errors: [] }`)",
+    "",
+    "### Unity Game-Specific Patterns",
+    "- ScriptableObject mutated at runtime without Instantiate — shared state corruption across all references",
+    "- Singleton with static MonoBehaviour reference but no duplicate guard on scene reload — double managers, leaked events",
+    "- Static event dictionary (SystemEventManager pattern) with StartListening but no StopListening — delegates on destroyed objects throw MissingReferenceException, prevent GC",
+    "- `Resources.Load` in loop or frequent path without caching result — repeated disk access causes frame stutters",
+    "- Event += subscription in Configure/Init without matching -= in OnDestroy/OnDisable — memory leaks and stale callbacks after scene transitions",
+    "- Coroutine started without storing reference or stopping on OnDisable/OnDestroy — orphaned coroutines access destroyed objects",
 ]
-
-
-# ============================================================
-#  Diff-based review prompts
-# ============================================================
-
-def build_system_prompt(detected_languages: list[str]) -> str:
-    """Build a system prompt tailored to the detected languages."""
-    lang_configs = [LANGUAGES[k] for k in detected_languages if k in LANGUAGES]
-    lang_names = (
-        ", ".join(c.name for c in lang_configs)
-        if lang_configs
-        else "general programming"
-    )
-
-    parts = [
-        f"You are BoomAI, an expert code reviewer with deep expertise in {lang_names}.",
-        "You review pull request diffs and static analysis findings.",
-        "",
-        "## Your Role",
-        "- Validate static analysis findings (confirm real issues, flag false positives)",
-        "- Find additional issues the static tools missed",
-        "- Focus on language-specific performance, safety, and best practice concerns",
-        "- Provide actionable suggestions with corrected code",
-    ]
-
-    if lang_configs:
-        parts.append("")
-        parts.append("## Language-Specific Expertise")
-        for config in lang_configs:
-            if config.expertise:
-                parts.append(f"### {config.name}")
-                parts.append(f"- {config.expertise}")
-
-    parts.extend(_SECURITY_PATTERNS)
-
-    parts.extend([
-        "",
-        "## Output Format",
-        "You MUST respond with valid JSON in this exact structure:",
-        "{",
-        '  "summary": "Brief overall assessment of the PR (2-3 sentences)",',
-        '  "findings": [',
-        "    {",
-        '      "file": "path/to/file.ext",',
-        '      "line": 42,',
-        '      "severity": "high",',
-        '      "message": "Clear explanation of the issue and WHY it matters",',
-        '      "old_code": "const x = foo.split(\\\':\\\')",',
-        '      "suggestion": "const [key, ...rest] = foo.split(\\\':\\\')\\nconst x = rest.join(\\\':\\\')"',
-        "    }",
-        "  ],",
-        '  "critical_count": 0',
-        "}",
-        "",
-        "## Rules",
-        "- severity must be one of: critical, high, medium, low, info",
-        "- line numbers are for reference only (to help locate the issue)",
-        "",
-        "## Suggestion Rules (CRITICAL — read carefully)",
-        "- old_code: copy-paste the EXACT code that needs to be replaced (as it appears in the file, with original indentation)",
-        "- suggestion: the EXACT replacement code that should replace old_code",
-        "- Both old_code and suggestion must be valid, syntactically correct code",
-        "- NEVER put natural language instructions in old_code or suggestion",
-        "- Keep fixes SMALL and SURGICAL — fix ONE thing at a time (max ~30 lines)",
-        '- To DELETE dead/duplicate code, provide old_code and set suggestion to an empty string ("")',
-        "- If a fix requires very large restructuring (more than ~30 lines), describe it in `message` and OMIT old_code/suggestion",
-        "- If you cannot provide an exact fix, omit both old_code and suggestion",
-        "",
-        "- Keep findings focused and actionable (max 15 per review)",
-        "- Do NOT repeat findings already reported by static analysis unless you have additional context",
-        "- If the code looks good, say so in the summary with minimal/no findings",
-        "- ALWAYS respond with valid JSON, nothing else",
-    ])
-
-    return "\n".join(parts)
-
-
-def build_user_message(
-    diff: str,
-    finding_count: int,
-    findings_json: str,
-    detected_languages: list[str],
-) -> str:
-    """Build the user message with language-aware review instructions."""
-    lang_configs = [LANGUAGES[k] for k in detected_languages if k in LANGUAGES]
-    lang_names = (
-        ", ".join(c.name for c in lang_configs)
-        if lang_configs
-        else "the codebase"
-    )
-
-    extra_bullets = "\n".join(_build_language_extras(lang_configs))
-
-    return f"""## Pull Request Diff
-
-{diff}
-
-## Static Analysis Findings (Top {finding_count})
-
-{findings_json}
-
-## Instructions
-1. Review the diff above (languages detected: {lang_names})
-2. Validate the static analysis findings (are they real issues?)
-3. Find additional issues the tools missed, especially:
-{extra_bullets}
-4. Provide your review as JSON per the system prompt format"""
 
 
 # ============================================================
 #  Full-codebase scan prompts
 # ============================================================
 
-def build_scan_system_prompt(detected_languages: list[str], comments: bool = False) -> str:
+def build_scan_system_prompt(detected_languages: list[str], comments: bool = False,
+                             explanations: bool = True) -> str:
     """Build system prompt for full-codebase scan mode."""
     lang_configs = [LANGUAGES[k] for k in detected_languages if k in LANGUAGES]
     lang_names = (
@@ -186,6 +87,9 @@ def build_scan_system_prompt(detected_languages: list[str], comments: bool = Fal
         "- Missing input validation and boundary checks",
         "- Concurrency and thread safety issues",
         "- Resource management (unclosed handles, missing cleanup)",
+        "- Unity lifecycle ordering issues (Awake/Start/OnEnable dependencies, missing OnDestroy cleanup)",
+        "- Hot path allocations (GC pressure from GetComponent, Physics, LINQ, string ops in Update/FixedUpdate)",
+        "- Physics correctness (FixedUpdate vs Update, NonAlloc variants, raycast efficiency)",
         "- Merge conflict artifacts and duplicate function/class definitions",
     ]
 
@@ -238,6 +142,10 @@ def build_scan_system_prompt(detected_languages: list[str], comments: bool = Fal
                      "on the FIRST changed line of each suggestion to explain the fix")
     else:
         parts.append("- Do NOT add any comments or annotations to the suggestion code")
+
+    if not explanations:
+        parts.append("- Keep the message field BRIEF (max 10 words, e.g. 'Thread.Sleep → Task.Delay') "
+                     "— do NOT explain why, just name the issue")
 
     parts.extend([
         "",
@@ -292,8 +200,6 @@ Group these files into review chunks following the rules in the system prompt.""
 
 def build_scan_user_message(
     file_contents: list[tuple[str, str]],
-    finding_count: int,
-    findings_json: str,
     detected_languages: list[str],
     chunk_info: str = "",
 ) -> str:
@@ -322,14 +228,9 @@ def build_scan_user_message(
 
 {files_text}
 
-## Static Analysis Findings (Top {finding_count})
-
-{findings_json}
-
 ## Instructions
 1. Review ALL the source files above (languages detected: {lang_names})
-2. Validate the static analysis findings (are they real issues?)
-3. Find additional issues the tools missed, especially:
+2. Find issues, especially:
 {extra_bullets}
-4. Focus on bugs, security issues, and correctness — not just style
-5. Provide your review as JSON per the system prompt format"""
+3. Focus on bugs, security issues, and correctness — not just style
+4. Provide your review as JSON per the system prompt format"""
