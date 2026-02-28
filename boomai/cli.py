@@ -191,6 +191,13 @@ def print_review(review: ReviewSummary, applied: int = 0, elapsed: float = 0):
     if elapsed:
         parts.append(_format_elapsed(elapsed))
     print(f"  {' | '.join(parts)}")
+    if review.usage and review.usage.api_calls > 0:
+        from boomai.estimator import format_actual_cost
+        print(format_actual_cost(
+            review.usage.prompt_tokens,
+            review.usage.completion_tokens,
+            settings.llm_model,
+        ))
     print(f"  {'='*56}")
     print(f"\n  {review.summary}\n")
 
@@ -271,45 +278,56 @@ async def run_local_scan(repo_path: str = ".",
                          include: list[str] | None = None,
                          comments: bool = False,
                          explanations: bool = True,
-                         on_chunk_done=None) -> ReviewSummary:
-    """Scan entire codebase and return AI review."""
+                         on_chunk_done=None,
+                         file_contents: list[tuple[str, str]] | None = None,
+                         ) -> ReviewSummary:
+    """Scan entire codebase and return AI review.
+
+    If file_contents is provided, skips file collection/reading
+    (used when caller already read files for estimation).
+    """
     from boomai.gemini_review import scan_with_gemini
 
-    print(f"\n  Collecting files...")
-    if repo_path != ".":
-        print(f"    Repo: {repo_path}")
-    if include:
-        print(f"    Include: {', '.join(include)}")
-    if exclude:
-        print(f"    Excluding: {', '.join(exclude)}")
+    if file_contents is None:
+        # Collect and read files (standalone usage without estimation)
+        print(f"\n  Collecting files...")
+        if repo_path != ".":
+            print(f"    Repo: {repo_path}")
+        if include:
+            print(f"    Include: {', '.join(include)}")
+        if exclude:
+            print(f"    Excluding: {', '.join(exclude)}")
 
-    all_files = collect_files(repo_path, exclude=exclude, include=include)
-    reviewable = filter_reviewable_files(all_files)
-    languages = detect_languages(all_files)
+        all_files = collect_files(repo_path, exclude=exclude, include=include)
+        reviewable = filter_reviewable_files(all_files)
+        languages = detect_languages(all_files)
 
-    lang_str = ', '.join(languages) if languages else 'none detected'
-    print(f"    {len(all_files):,} total, {len(reviewable)} reviewable ({lang_str})")
+        lang_str = ', '.join(languages) if languages else 'none detected'
+        print(f"    {len(all_files):,} total, {len(reviewable)} reviewable ({lang_str})")
 
-    if not reviewable:
-        return ReviewSummary(
-            summary="No reviewable source files found.",
-            findings=[],
-            critical_count=0,
-            has_critical=False,
-        )
+        if not reviewable:
+            return ReviewSummary(
+                summary="No reviewable source files found.",
+                findings=[],
+                critical_count=0,
+                has_critical=False,
+            )
 
-    if len(reviewable) > settings.scan_max_files:
-        print(f"    Warning: {len(reviewable)} files exceeds limit of {settings.scan_max_files}.")
-        print(f"    Use --include to narrow scope.")
-        return ReviewSummary(
-            summary=f"Scan aborted: {len(reviewable)} files exceeds limit of {settings.scan_max_files}.",
-            findings=[],
-            critical_count=0,
-            has_critical=False,
-        )
+        if len(reviewable) > settings.scan_max_files:
+            print(f"    Warning: {len(reviewable)} files exceeds limit of {settings.scan_max_files}.")
+            print(f"    Use --include to narrow scope.")
+            return ReviewSummary(
+                summary=f"Scan aborted: {len(reviewable)} files exceeds limit of {settings.scan_max_files}.",
+                findings=[],
+                critical_count=0,
+                has_critical=False,
+            )
 
-    # Read file contents
-    file_contents = read_file_contents(reviewable, repo_path)
+        file_contents = read_file_contents(reviewable, repo_path)
+        languages = detect_languages([p for p, _ in file_contents])
+    else:
+        languages = detect_languages([p for p, _ in file_contents])
+
     total_chars = sum(len(c) for _, c in file_contents)
     print(f"    {total_chars:,} chars across {len(file_contents)} files")
     print(f"    Model: {settings.llm_model}")
@@ -329,9 +347,55 @@ async def run_local_scan(repo_path: str = ".",
 
 def cmd_fix(args):
     """Scan entire codebase and auto-apply fixes."""
+    from boomai.estimator import estimate_scan, format_estimate
+
     require_api_key()
-    t0 = time.monotonic()
     repo_path = os.path.abspath(".")
+
+    # ── Collect files ─────────────────────────────────────
+    print(f"\n  Collecting files...")
+    all_files = collect_files(repo_path)
+    if args.shallow:
+        all_files = [f for f in all_files if "/" not in f]
+    reviewable = filter_reviewable_files(all_files)
+    languages = detect_languages(all_files)
+
+    lang_str = ", ".join(languages) if languages else "none detected"
+    print(f"    {len(all_files):,} total, {len(reviewable)} reviewable ({lang_str})")
+
+    if not reviewable:
+        print("  No reviewable source files found.")
+        return
+
+    if len(reviewable) > settings.scan_max_files:
+        print(f"    Warning: {len(reviewable)} files exceeds limit of {settings.scan_max_files}.")
+        print(f"    Use --include to narrow scope.")
+        return
+
+    file_contents = read_file_contents(reviewable, repo_path)
+
+    # ── Estimate cost & time ──────────────────────────────
+    estimate = estimate_scan(
+        file_contents=file_contents,
+        model=settings.llm_model,
+        max_scan_chars=settings.max_scan_chars,
+        scan_output_tokens=settings.scan_output_tokens,
+        plan_output_tokens=settings.plan_output_tokens,
+        languages=languages,
+    )
+    format_estimate(estimate)
+
+    try:
+        answer = input("  Proceed? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Aborted.")
+        return
+    if answer and answer not in ("y", "yes", ""):
+        print("  Aborted.")
+        return
+
+    # ── Scan ──────────────────────────────────────────────
+    t0 = time.monotonic()
     comments = settings.scan_comments
     explanations = settings.scan_explanations
 
@@ -347,6 +411,7 @@ def cmd_fix(args):
     review = asyncio.run(run_local_scan(
         repo_path, comments=comments, explanations=explanations,
         on_chunk_done=_on_chunk_done,
+        file_contents=file_contents,
     ))
     elapsed = time.monotonic() - t0
     print_review(review, applied=applied_total, elapsed=elapsed)
@@ -439,6 +504,11 @@ def cmd_settings(args):
 # ============================================================
 
 def main():
+    # Prevent UnicodeEncodeError on Windows consoles (e.g. cp1253)
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(errors="replace")
+
     parser = argparse.ArgumentParser(
         prog="boom-ai",
         description="BoomAI — AI-powered code fixer",
@@ -452,7 +522,11 @@ Examples (run from inside your project):
     sub = parser.add_subparsers(dest="command")
 
     # --- fix ---
-    sub.add_parser("fix", help="Scan codebase and auto-apply fixes")
+    fix_parser = sub.add_parser("fix", help="Scan codebase and auto-apply fixes")
+    fix_parser.add_argument(
+        "--shallow", action="store_true",
+        help="Only scan files in CWD, skip subdirectories",
+    )
 
     # --- settings ---
     sub.add_parser("settings", help="Configure API key & preferences")

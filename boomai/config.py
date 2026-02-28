@@ -23,8 +23,8 @@ class Settings(BaseSettings):
     scan_explanations: bool = True
 
     # Scan planning (repo-map phase)
-    plan_output_tokens: int = 32768
-    plan_timeout: float = 90.0
+    plan_output_tokens: int = 65536
+    plan_timeout: float = 180.0
 
     model_config = {
         "env_file": (".env", str(_global_env)),

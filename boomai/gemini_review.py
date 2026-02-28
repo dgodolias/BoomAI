@@ -9,7 +9,7 @@ from typing import Callable
 import httpx
 
 from .config import settings
-from .models import ReviewComment, ReviewSummary
+from .models import ReviewComment, ReviewSummary, UsageStats
 from .prompts import (
     build_scan_system_prompt, build_scan_user_message,
     build_plan_prompt, build_plan_user_message,
@@ -19,6 +19,49 @@ logger = logging.getLogger(__name__)
 
 # Type alias for progress callback
 ProgressFn = Callable[[str], None] | None
+
+# Model fallback chain — each model has separate rate limits (RPM/RPD)
+_FALLBACK_MODELS = [
+    "gemini-3.1-pro-preview-customtools",
+    "gemini-2.5-pro",
+    "gemini-3-flash",
+    "gemini-2.5-flash",
+]
+
+
+class _ModelChain:
+    """Thread-safe model fallback chain for 429 rate limits."""
+
+    def __init__(self, initial_model: str):
+        self._models = list(_FALLBACK_MODELS)
+        try:
+            self._index = self._models.index(initial_model)
+        except ValueError:
+            self._models.insert(0, initial_model)
+            self._index = 0
+        self._lock = asyncio.Lock()
+
+    @property
+    def current(self) -> str:
+        return self._models[self._index]
+
+    @property
+    def exhausted(self) -> bool:
+        return self._index >= len(self._models)
+
+    async def advance(self, failed_model: str) -> str | None:
+        """Advance past failed_model. Returns new model or None if exhausted."""
+        async with self._lock:
+            if self.current != failed_model:
+                return self.current if not self.exhausted else None
+            self._index += 1
+            return self.current if not self.exhausted else None
+
+    def build_url(self) -> str:
+        return (
+            f"{settings.gemini_base_url}/{self.current}"
+            f":generateContent?key={settings.google_api_key}"
+        )
 
 
 async def _with_heartbeat(
@@ -60,7 +103,7 @@ async def _gemini_post(
                     headers={"Content-Type": "application/json"},
                     json=payload,
                 )
-        except (httpx.ConnectError, httpx.TimeoutException) as e:
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError) as e:
             error_type = type(e).__name__
             if attempt < max_retries - 1:
                 wait = 2 ** (attempt + 1)
@@ -183,38 +226,29 @@ def _parse_review_response(text: str) -> ReviewSummary:
 # ============================================================
 
 def _build_repo_map(file_contents: list[tuple[str, str]]) -> str:
-    """Build a tree-view string of the repo for LLM planning.
+    """Build a directory-level summary for LLM planning.
 
-    Output looks like:
-      Assets/Scripts/Behaviours/Ped/
-        Ped.cs                          (850 lines, 28.1K)
-        PedModel.cs                     (120 lines, 3.9K)
-      Assets/Scripts/Networking/
-        PedSync.cs                      (180 lines, 5.8K)
+    Output: one line per directory with file count and total size.
+    Gemini groups directories, not individual files — keeps I/O small.
+
+      Assets/Scripts/Game/ (45 files, 890K)
+      Assets/Scripts/API/ (28 files, 320K)
     """
-    from collections import defaultdict
     import posixpath
+    from collections import defaultdict
 
-    # Group files by directory
-    dirs: dict[str, list[tuple[str, int, int]]] = defaultdict(list)
+    dirs: dict[str, list[int]] = defaultdict(list)
     for path, content in file_contents:
         norm = path.replace("\\", "/")
         folder = posixpath.dirname(norm) or "."
-        lines = content.count("\n") + 1
-        chars = len(content)
-        dirs[folder].append((posixpath.basename(norm), lines, chars))
+        dirs[folder].append(len(content))
 
     lines_out: list[str] = []
-    for folder in sorted(dirs):
-        files = sorted(dirs[folder], key=lambda x: -x[2])  # largest first
-        dir_chars = sum(c for _, _, c in files)
-        lines_out.append(f"  {folder}/  ({len(files)} files, {dir_chars:,} chars)")
-        for name, line_count, char_count in files:
-            size_str = (
-                f"{char_count / 1000:.1f}K" if char_count >= 1000
-                else f"{char_count}"
-            )
-            lines_out.append(f"    {name:<45} ({line_count} lines, {size_str})")
+    # Sort by total chars descending — largest directories first
+    for folder, sizes in sorted(dirs.items(), key=lambda x: -sum(x[1])):
+        total = sum(sizes)
+        size_str = f"{total / 1000:.0f}K" if total >= 1000 else str(total)
+        lines_out.append(f"{folder}/ ({len(sizes)} files, {size_str})")
 
     return "\n".join(lines_out)
 
@@ -224,6 +258,8 @@ async def _plan_chunks(
     detected_languages: list[str],
     char_budget: int,
     on_progress: ProgressFn = None,
+    model_chain: _ModelChain | None = None,
+    usage: UsageStats | None = None,
 ) -> list[list[tuple[str, str]]] | None:
     """Ask Gemini to plan optimal file groupings. Returns None on failure."""
     def _emit(msg: str) -> None:
@@ -237,7 +273,7 @@ async def _plan_chunks(
     system_prompt = build_plan_prompt(char_budget)
     user_message = build_plan_user_message(repo_map, total_files, total_chars)
 
-    url = (
+    url = model_chain.build_url() if model_chain else (
         f"{settings.gemini_base_url}/{settings.llm_model}"
         f":generateContent?key={settings.google_api_key}"
     )
@@ -265,6 +301,17 @@ async def _plan_chunks(
         _emit(f"  Planning hard timeout at {int(settings.plan_timeout)}s, using greedy chunking")
         return None
 
+    if response is not None and response.status_code == 429 and model_chain:
+        failed = model_chain.current
+        next_model = await model_chain.advance(failed)
+        if next_model:
+            _emit(f"  Planning rate limited on {failed}, retrying with {next_model}")
+            return await _plan_chunks(
+                file_contents, detected_languages, char_budget,
+                on_progress=on_progress, model_chain=model_chain,
+                usage=usage,
+            )
+
     if response is None or response.status_code != 200:
         status = f" (HTTP {response.status_code})" if response else ""
         _emit(f"  Planning failed{status}, using greedy chunking")
@@ -272,6 +319,8 @@ async def _plan_chunks(
 
     try:
         result = response.json()
+        if usage:
+            usage.add(result)
         text = result["candidates"][0]["content"]["parts"][0]["text"]
         sanitized = _sanitize_json(text)
         data = json.loads(sanitized)
@@ -279,53 +328,77 @@ async def _plan_chunks(
         logger.warning(f"Failed to parse planning response: {e}")
         return None
 
-    # Build lookup: normalized path -> (path, content)
-    content_map: dict[str, tuple[str, str]] = {}
-    for path, content in file_contents:
-        content_map[path.replace("\\", "/")] = (path, content)
+    # Build dir -> files lookup for expanding directory assignments
+    import posixpath
+    from collections import defaultdict
 
-    # Validate and build chunks
+    dir_files: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    dir_files_lower: dict[str, str] = {}  # lowercase -> canonical dir key
+    for path, content in file_contents:
+        norm = path.replace("\\", "/")
+        folder = posixpath.dirname(norm) or "."
+        dir_key = folder + "/"
+        dir_files[dir_key].append((path, content))
+        dir_files_lower[dir_key.lower()] = dir_key
+
+    def _resolve_dir(raw: str) -> str | None:
+        """Resolve a Gemini-returned directory to a dir_files key."""
+        norm = raw.replace("\\", "/").rstrip("/") + "/"
+        if norm.startswith("./"):
+            norm = norm[2:]
+        if norm in dir_files:
+            return norm
+        lower = norm.lower()
+        if lower in dir_files_lower:
+            return dir_files_lower[lower]
+        return None
+
+    # Validate and build chunks from directory assignments
     planned_chunks: list[list[tuple[str, str]]] = []
-    seen: set[str] = set()
+    seen_dirs: set[str] = set()
 
     for chunk_def in data.get("chunks", []):
         chunk_files: list[tuple[str, str]] = []
-        chunk_chars = 0
-        for file_path in chunk_def.get("files", []):
-            norm = file_path.replace("\\", "/")
-            if norm not in content_map:
-                logger.warning(f"Planning: unknown file '{file_path}', skipping")
+        for dir_path in chunk_def.get("dirs", []):
+            key = _resolve_dir(dir_path)
+            if key is None:
+                logger.warning(f"Planning: unknown dir '{dir_path}', skipping")
                 continue
-            if norm in seen:
-                logger.warning(f"Planning: duplicate file '{file_path}', skipping")
+            if key in seen_dirs:
                 continue
-            seen.add(norm)
-            pair = content_map[norm]
-            chunk_files.append(pair)
-            chunk_chars += len(pair[1])
+            seen_dirs.add(key)
+            chunk_files.extend(dir_files[key])
         if chunk_files:
             planned_chunks.append(chunk_files)
 
-    # Check coverage — every file must be assigned
-    all_paths = set(p.replace("\\", "/") for p, _ in file_contents)
-    missing = all_paths - seen
-    if missing:
-        logger.warning(
-            f"Planning missed {len(missing)} file(s), appending as extra chunk"
-        )
-        extra = [content_map[p] for p in sorted(missing)]
-        planned_chunks.append(extra)
+    # Check coverage — every directory must be assigned
+    missing_dirs = set(dir_files.keys()) - seen_dirs
+    missing_files: list[tuple[str, str]] = []
+    for d in sorted(missing_dirs):
+        missing_files.extend(dir_files[d])
+    if missing_files:
+        _emit(f"  Planning missed {len(missing_dirs)} dir(s) ({len(missing_files)} files), appending as extra chunk(s)")
+        planned_chunks.append(missing_files)
 
     if not planned_chunks:
         _emit("  Planning returned empty chunks, using greedy chunking")
         return None
 
+    # Post-process: split any oversized chunk through _chunk_files()
+    # LLM often ignores char budget when dirs are individually large
+    final_chunks: list[list[tuple[str, str]]] = []
     focus_list = [c.get("focus", "") for c in data.get("chunks", [])]
     for i, ch in enumerate(planned_chunks):
-        focus = f" — {focus_list[i]}" if i < len(focus_list) and focus_list[i] else ""
         chars = sum(len(c) for _, c in ch)
-        _emit(f"  Chunk {i+1}: {len(ch)} files, {chars:,} chars{focus}")
-    return planned_chunks
+        focus = f" — {focus_list[i]}" if i < len(focus_list) and focus_list[i] else ""
+        if chars > char_budget:
+            sub = _chunk_files(ch, char_budget)
+            _emit(f"  Chunk {i+1}: {len(ch)} files, {chars:,} chars → split into {len(sub)} sub-chunks{focus}")
+            final_chunks.extend(sub)
+        else:
+            _emit(f"  Chunk {i+1}: {len(ch)} files, {chars:,} chars{focus}")
+            final_chunks.append(ch)
+    return final_chunks
 
 
 def _chunk_files(
@@ -362,6 +435,8 @@ async def _scan_chunk(
     comments: bool = False,
     explanations: bool = True,
     on_progress: ProgressFn = None,
+    model_chain: _ModelChain | None = None,
+    usage: UsageStats | None = None,
 ) -> ReviewSummary:
     """Send a single chunk of files to Gemini for scan review."""
     system_prompt = build_scan_system_prompt(
@@ -374,7 +449,7 @@ async def _scan_chunk(
         chunk_info=chunk_info,
     )
 
-    url = (
+    url = model_chain.build_url() if model_chain else (
         f"{settings.gemini_base_url}/{settings.llm_model}"
         f":generateContent?key={settings.google_api_key}"
     )
@@ -382,6 +457,11 @@ async def _scan_chunk(
     def _on_retry(attempt: int, msg: str) -> None:
         if on_progress:
             on_progress(f"  {chunk_info} — attempt {attempt} failed: {msg}")
+
+    # Give single-file chunks 2x timeout — they can't be split further
+    effective_timeout = settings.scan_timeout
+    if len(file_contents) == 1:
+        effective_timeout = settings.scan_timeout * 2
 
     try:
         response = await _with_heartbeat(
@@ -394,24 +474,42 @@ async def _scan_chunk(
                         "temperature": 0.1,
                         "responseMimeType": "application/json",
                     },
-                }, timeout=settings.scan_timeout, on_retry=_on_retry),
-                timeout=settings.scan_timeout,
+                }, timeout=effective_timeout, on_retry=_on_retry),
+                timeout=effective_timeout,
             ),
             emit=on_progress, label=chunk_info or "Reviewing",
         )
     except asyncio.TimeoutError:
         if on_progress:
-            on_progress(f"  {chunk_info} — hard timeout at {int(settings.scan_timeout)}s")
+            on_progress(f"  {chunk_info} — hard timeout at {int(effective_timeout)}s")
         return _fallback_review()
 
     if response is None:
         return _fallback_review()
+
+    if response.status_code == 429:
+        if model_chain:
+            failed = model_chain.current
+            next_model = await model_chain.advance(failed)
+            if next_model:
+                if on_progress:
+                    on_progress(f"  {chunk_info} — rate limited on {failed}, switching to {next_model}")
+                return await _scan_chunk(
+                    file_contents, detected_languages, chunk_info,
+                    comments=comments, explanations=explanations,
+                    on_progress=on_progress, model_chain=model_chain,
+                    usage=usage,
+                )
+        logger.error("Rate limited (429) — no fallback models left")
+        return _rate_limited_review()
 
     if response.status_code != 200:
         logger.error(f"Gemini API error {response.status_code}: {response.text[:500]}")
         return _fallback_review()
 
     result = response.json()
+    if usage:
+        usage.add(result)
 
     if "error" in result:
         logger.error(f"Gemini API error: {result['error'].get('message', 'Unknown')}")
@@ -450,20 +548,19 @@ async def scan_with_gemini(
         if on_progress:
             on_progress(msg)
 
-    # Try LLM-planned chunks first, fall back to greedy
-    # Skip LLM planning for large repos — greedy is fast and reliable
-    if len(file_contents) > 300:
-        _emit(f"Large repo ({len(file_contents)} files) — using greedy chunking")
+    model_chain = _ModelChain(settings.llm_model)
+    usage = UsageStats()
+
+    # Always try LLM planning first — hard timeout protects us
+    _emit("Planning review chunks...")
+    chunks = await _plan_chunks(
+        file_contents, detected_languages, settings.max_scan_chars,
+        on_progress=on_progress, model_chain=model_chain, usage=usage,
+    )
+    if chunks is None:
+        _emit("Using greedy chunking")
         chunks = _chunk_files(file_contents, settings.max_scan_chars)
-    else:
-        _emit("Planning review chunks...")
-        chunks = await _plan_chunks(
-            file_contents, detected_languages, settings.max_scan_chars,
-            on_progress=on_progress,
-        )
-        if chunks is None:
-            chunks = _chunk_files(file_contents, settings.max_scan_chars)
-    _emit(f"{len(chunks)} chunk(s) planned")
+    _emit(f"{len(chunks)} chunk(s) planned, model: {model_chain.current}")
 
     if len(chunks) == 1:
         chars = sum(len(c) for _, c in chunks[0])
@@ -476,9 +573,14 @@ async def scan_with_gemini(
             result = await _scan_chunk(
                 chunk, detected_languages, label,
                 comments=comments, explanations=explanations,
-                on_progress=on_progress,
+                on_progress=on_progress, model_chain=model_chain,
+                usage=usage,
             )
-            if result.summary == "AI review unavailable." and len(chunk) > 5:
+            # 429 — stop immediately, don't split
+            if result.summary == "Rate limited.":
+                _emit("Rate limited — aborting")
+                return result
+            if result.summary == "AI review unavailable." and len(chunk) > 1:
                 mid = len(chunk) // 2
                 _emit(f"{label} failed — splitting and retrying")
                 a = await _review_single(chunk[:mid], f"{label}a")
@@ -492,14 +594,16 @@ async def scan_with_gemini(
             return result
 
         result = await _review_single(chunks[0], "Chunk 1/1")
+        result.usage = usage
         _emit(f"Done — {len(result.findings)} issues found")
         if on_chunk_done:
             on_chunk_done(result)
         return result
 
     # Multiple chunks — call Gemini concurrently, merge results
-    max_concurrent = 3
+    max_concurrent = 3 if len(chunks) <= 20 else 2
     sem = asyncio.Semaphore(max_concurrent)
+    stop_event = asyncio.Event()  # set on 429 — stops all remaining chunks
     completed = 0
     _emit(f"Reviewing code [{len(chunks)} chunks, {max_concurrent} concurrent]")
 
@@ -507,15 +611,24 @@ async def scan_with_gemini(
         chunk: list[tuple[str, str]], label: str,
     ) -> ReviewSummary:
         """Scan a chunk; on failure, split in half and retry sub-chunks."""
+        if stop_event.is_set():
+            return _rate_limited_review()
         chars = sum(len(c) for _, c in chunk)
         _emit(f"{label} {len(chunk)} files, {chars:,} chars...")
         result = await _scan_chunk(
             chunk, detected_languages, label,
             comments=comments, explanations=explanations,
-            on_progress=on_progress,
+            on_progress=on_progress, model_chain=model_chain,
+            usage=usage,
         )
+        # 429 with all models exhausted — stop everything, don't split
+        if result.summary == "Rate limited.":
+            if not stop_event.is_set():
+                _emit("All models rate limited — stopping remaining chunks")
+                stop_event.set()
+            return result
         # If failed and chunk is splittable, split in half and retry
-        if result.summary == "AI review unavailable." and len(chunk) > 5:
+        if result.summary == "AI review unavailable." and len(chunk) > 1:
             mid = len(chunk) // 2
             _emit(f"{label} failed — splitting into 2 sub-chunks and retrying")
             sub_a = await _review_chunk(chunk[:mid], f"{label}a")
@@ -535,6 +648,8 @@ async def scan_with_gemini(
     ) -> ReviewSummary:
         nonlocal completed
         async with sem:
+            if stop_event.is_set():
+                return _rate_limited_review()
             label = f"[{idx}/{len(chunks)}]"
             result = await _review_chunk(chunk, label)
             completed += 1
@@ -564,6 +679,7 @@ async def scan_with_gemini(
         findings=all_findings,
         critical_count=total_critical,
         has_critical=total_critical > 0,
+        usage=usage,
     )
 
 
@@ -571,6 +687,16 @@ def _fallback_review() -> ReviewSummary:
     """Return an empty review when Gemini fails."""
     return ReviewSummary(
         summary="AI review unavailable.",
+        findings=[],
+        critical_count=0,
+        has_critical=False,
+    )
+
+
+def _rate_limited_review() -> ReviewSummary:
+    """Return an empty review for 429 rate limit — must NOT trigger auto-split."""
+    return ReviewSummary(
+        summary="Rate limited.",
         findings=[],
         critical_count=0,
         has_critical=False,

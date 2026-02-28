@@ -1,5 +1,7 @@
-from pydantic import BaseModel
+from dataclasses import dataclass, field
 from enum import Enum
+
+from pydantic import BaseModel
 
 
 class Severity(str, Enum):
@@ -38,8 +40,25 @@ class ReviewComment(BaseModel):
     old_code: str | None = None
 
 
+@dataclass
+class UsageStats:
+    """Accumulated token usage from Gemini API responses."""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    api_calls: int = 0
+
+    def add(self, result: dict) -> None:
+        meta = result.get("usageMetadata", {})
+        self.prompt_tokens += meta.get("promptTokenCount", 0)
+        self.completion_tokens += meta.get("candidatesTokenCount", 0)
+        self.api_calls += 1
+
+
 class ReviewSummary(BaseModel):
     summary: str
     findings: list[ReviewComment]
     critical_count: int = 0
     has_critical: bool = False
+    usage: UsageStats | None = None
+
+    model_config = {"arbitrary_types_allowed": True}

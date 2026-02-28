@@ -165,37 +165,40 @@ def build_scan_system_prompt(detected_languages: list[str], comments: bool = Fal
 
 def build_plan_prompt(char_budget: int) -> str:
     """Build system prompt for the scan planning phase."""
-    return f"""You are BoomAI's planning module. You receive a repository map showing
-the folder structure with file sizes (lines and characters).
+    return f"""You are BoomAI's planning module. You receive a directory map showing
+each folder with its file count and total character size.
 
-Your job: group files into review chunks for an AI code reviewer.
+Your job: group **directories** into review chunks for an AI code reviewer.
 
 ## Rules
-- Each chunk MUST stay under {char_budget:,} characters total (sum of all file char counts)
-- Group related files together (same namespace/module, a class + its tests, a controller + its service)
-- Put the most complex/largest files in smaller chunks so they get full reviewer attention
-- Every file in the map MUST appear in exactly one chunk — do not skip any
+- Each chunk MUST stay under {char_budget:,} characters total
+- Group related directories together (same subsystem, feature area, or module)
+- Put directories with the largest/most complex code in smaller chunks so they get full reviewer attention
+- Every directory in the map MUST appear in exactly one chunk — do not skip any
 - Order chunks so the most important/complex ones come first
+- If a single directory exceeds the budget, put it alone in its own chunk
 
 ## Output Format
 Respond with valid JSON only:
 {{
   "chunks": [
     {{
-      "files": ["path/to/file1.cs", "path/to/file2.cs"],
-      "focus": "Brief description of what this chunk covers"
+      "dirs": ["Assets/Scripts/Game/Player/", "Assets/Scripts/Game/Items/"],
+      "focus": "Player systems and inventory"
     }}
   ]
-}}"""
+}}
+
+IMPORTANT: Use the exact directory paths from the map. Include the trailing slash."""
 
 
 def build_plan_user_message(repo_map: str, total_files: int, total_chars: int) -> str:
     """Build user message for the scan planning phase."""
-    return f"""## Repository Map ({total_files} files, {total_chars:,} characters total)
+    return f"""## Directory Map ({total_files} files, {total_chars:,} characters total)
 
 {repo_map}
 
-Group these files into review chunks following the rules in the system prompt."""
+Group these directories into review chunks following the rules in the system prompt."""
 
 
 def build_scan_user_message(
