@@ -23,6 +23,44 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
+#  Banner
+# ============================================================
+
+_BANNER_LINES = [
+    r"                     *    .    *",
+    r"          *    .         *         .    *",
+    r"     .       *    .  *      *    .       .",
+    r"        .  *    .       .       *   .",
+    r"   *                                        *",
+    r"       ____   ___   ___  __  __",
+    r"      | __ ) / _ \ / _ \|  \/  |    *",
+    r"      |  _ \| | | | | | | |\/| |  *",
+    r"      | |_) | |_| | |_| | |  | |",
+    r"      |____/ \___/ \___/|_|  |_|",
+    r"                 _      ___",
+    r"                / \    |_ _|",
+    r"               / _ \    | |",
+    r"              / ___ \   | |",
+    r"             /_/   \_\ |___|",
+    r"   *                                        *",
+    r"        *   .       .    *     .",
+    r"     .       *    .  *      *    .       .",
+    r"          *    .         *         .    *",
+    r"                     *    .    *",
+]
+
+
+def print_banner():
+    """Print the BoomAI ASCII art banner."""
+    print()
+    for line in _BANNER_LINES:
+        print(line)
+    print()
+    print("      AI-powered code fixer for C#/Unity")
+    print()
+
+
+# ============================================================
 #  Local file operations
 # ============================================================
 
@@ -533,6 +571,8 @@ Examples (run from inside your project):
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
+
+    print_banner()
 
     if args.command == "fix":
         cmd_fix(args)
