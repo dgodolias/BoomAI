@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from boomai.analysis.languages import detect_languages, filter_reviewable_files
@@ -29,37 +30,218 @@ logger = logging.getLogger(__name__)
 #  Banner
 # ============================================================
 
-_BANNER_LINES = [
-    r"                     *    .    *",
-    r"          *    .         *         .    *",
-    r"     .       *    .  *      *    .       .",
-    r"        .  *    .       .       *   .",
-    r"   *                                        *",
-    r"       ____   ___   ___  __  __",
-    r"      | __ ) / _ \ / _ \|  \/  |    *",
-    r"      |  _ \| | | | | | | |\/| |  *",
-    r"      | |_) | |_| | |_| | |  | |",
-    r"      |____/ \___/ \___/|_|  |_|",
-    r"                 _      ___",
-    r"                / \    |_ _|",
-    r"               / _ \    | |",
-    r"              / ___ \   | |",
-    r"             /_/   \_\ |___|",
-    r"   *                                        *",
-    r"        *   .       .    *     .",
-    r"     .       *    .  *      *    .       .",
-    r"          *    .         *         .    *",
-    r"                     *    .    *",
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_BOOM_COLORS = [
+    (104, 41, 196),   # boom purple
+    (139, 48, 214),   # bright violet
+    (180, 60, 221),   # neon violet
+    (222, 82, 202),   # magenta
+    (255, 119, 171),  # boom pink
 ]
 
 
+def _supports_color() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    term = os.environ.get("TERM", "")
+    return sys.stdout.isatty() and term.lower() != "dumb"
+
+
+def _rgb(color: tuple[int, int, int], text: str, *, bold: bool = False, dim: bool = False) -> str:
+    prefix = []
+    if bold:
+        prefix.append(_BOLD)
+    if dim:
+        prefix.append(_DIM)
+    prefix.append(f"\033[38;2;{color[0]};{color[1]};{color[2]}m")
+    return "".join(prefix) + text + _RESET
+
+
+def _gradient_text(text: str, colors: list[tuple[int, int, int]]) -> str:
+    if not text:
+        return text
+    if not _supports_color():
+        return text
+
+    colored: list[str] = []
+    steps = max(1, len(text) - 1)
+    segments = len(colors) - 1
+
+    for index, char in enumerate(text):
+        if char == " ":
+            colored.append(char)
+            continue
+        position = index / steps
+        segment = min(segments - 1, int(position * segments))
+        local_start = segment / segments
+        local_end = (segment + 1) / segments
+        local_t = 0.0 if local_end == local_start else (position - local_start) / (local_end - local_start)
+        start = colors[segment]
+        end = colors[segment + 1]
+        color = (
+            int(start[0] + (end[0] - start[0]) * local_t),
+            int(start[1] + (end[1] - start[1]) * local_t),
+            int(start[2] + (end[2] - start[2]) * local_t),
+        )
+        colored.append(_rgb(color, char, bold=True))
+    return "".join(colored)
+
+
+def _gradient_block_line(text: str, colors: list[tuple[int, int, int]]) -> str:
+    if not text or not _supports_color():
+        return text
+
+    visible_columns = [index for index, char in enumerate(text) if char != " "]
+    if not visible_columns:
+        return text
+
+    start_col = visible_columns[0]
+    end_col = visible_columns[-1]
+    span = max(1, end_col - start_col)
+    segments = len(colors) - 1
+    colored: list[str] = []
+
+    for index, char in enumerate(text):
+        if char == " ":
+            colored.append(char)
+            continue
+        position = (index - start_col) / span
+        segment = min(segments - 1, int(position * segments))
+        local_start = segment / segments
+        local_end = (segment + 1) / segments
+        local_t = 0.0 if local_end == local_start else (position - local_start) / (local_end - local_start)
+        start = colors[segment]
+        end = colors[segment + 1]
+        color = (
+            int(start[0] + (end[0] - start[0]) * local_t),
+            int(start[1] + (end[1] - start[1]) * local_t),
+            int(start[2] + (end[2] - start[2]) * local_t),
+        )
+        colored.append(_rgb(color, char, bold=True))
+    return "".join(colored)
+
+
+def _render_pixel_banner_line(pattern: str, colors: list[tuple[int, int, int]]) -> str:
+    if not pattern or not _supports_color():
+        return pattern
+
+    visible_columns = [index for index, char in enumerate(pattern) if char != " "]
+    if not visible_columns:
+        return pattern
+
+    start_col = visible_columns[0]
+    end_col = visible_columns[-1]
+    span = max(1, end_col - start_col)
+    segments = len(colors) - 1
+    rendered: list[str] = []
+
+    for index, char in enumerate(pattern):
+        if char == " ":
+            rendered.append(char)
+            continue
+
+        position = (index - start_col) / span
+        segment = min(segments - 1, int(position * segments))
+        local_start = segment / segments
+        local_end = (segment + 1) / segments
+        local_t = 0.0 if local_end == local_start else (position - local_start) / (local_end - local_start)
+        start = colors[segment]
+        end = colors[segment + 1]
+        color = (
+            int(start[0] + (end[0] - start[0]) * local_t),
+            int(start[1] + (end[1] - start[1]) * local_t),
+            int(start[2] + (end[2] - start[2]) * local_t),
+        )
+
+        if char == "░":
+            rendered.append(_rgb(color, char, dim=True))
+        else:
+            rendered.append(_rgb(color, char, bold=True))
+
+    return "".join(rendered)
+
+
 def print_banner():
-    """Print the BoomAI ASCII art banner."""
+    """Print a branded BoomAI terminal banner."""
     print()
-    for line in _BANNER_LINES:
-        print(line)
-    print()
-    print("      AI-powered code fixer for C#/Unity")
+    if _supports_color():
+        accent = "pixel-powered code fixer for C#/Unity"
+        divider = _rgb((186, 106, 220), "· " * 28, dim=True)
+        title_lines = [
+            "██████╗  ██████╗  ██████╗ ███╗   ███╗     █████╗ ██╗",
+            "██╔══██╗██╔═══██╗██╔═══██╗████╗ ████║    ██╔══██╗██║",
+            "██████╔╝██║   ██║██║   ██║██╔████╔██║    ███████║██║",
+            "██╔══██╗██║   ██║██║   ██║██║╚██╔╝██║    ██╔══██║██║",
+            "██████╔╝╚██████╔╝╚██████╔╝██║ ╚═╝ ██║    ██║  ██║██║",
+            "╚═════╝  ╚═════╝  ╚═════╝ ╚═╝     ╚═╝    ╚═╝  ╚═╝╚═╝",
+        ]
+
+        print(f"  {divider}")
+        print()
+        for line in title_lines:
+            print(f"    {_render_pixel_banner_line(line, _BOOM_COLORS)}")
+        print()
+        print(f"    {_rgb((214, 126, 220), accent, dim=True)}")
+        print(f"  {divider}")
+        print()
+        return
+        accent = "pixel-powered code fixer for C#/Unity"
+        divider = _rgb((118, 36, 168), "· " * 28, dim=True)
+        shadow_color = (84, 28, 118)
+        title_lines = [
+            "██████   ██████   ██████  ███    ███          █████  ██ ",
+            "██   ██ ██    ██ ██    ██ ████  ████         ██   ██ ██ ",
+            "██████  ██    ██ ██    ██ ██ ████ ██   ███   ███████ ██ ",
+            "██   ██ ██    ██ ██    ██ ██  ██  ██         ██   ██ ██ ",
+            "██████   ██████   ██████  ██      ██         ██   ██ ██ ",
+        ]
+
+        print(f"  {divider}")
+        print()
+        for line in title_lines:
+            print(f"    {_gradient_block_line(line, _BOOM_COLORS)}")
+            print(f"    {_rgb(shadow_color, line.replace('█', '░'), dim=True)}")
+        print()
+        print(f"    {_rgb((204, 120, 214), accent, dim=True)}")
+        print(f"  {divider}")
+        print()
+        return
+        accent = "pixel-powered code fixer for C#/Unity"
+        divider = _rgb((90, 26, 126), "· " * 28, dim=True)
+        shadow_color = (92, 43, 128)
+        title_lines = [
+            "██████   ██████   ██████  ███    ███          █████  ██ ",
+            "██   ██ ██    ██ ██    ██ ████  ████         ██   ██ ██ ",
+            "██████  ██    ██ ██    ██ ██ ████ ██   ███   ███████ ██ ",
+            "██   ██ ██    ██ ██    ██ ██  ██  ██         ██   ██ ██ ",
+            "██████   ██████   ██████  ██      ██         ██   ██ ██ ",
+        ]
+
+        print(f"  {divider}")
+        print()
+        for index, line in enumerate(title_lines):
+            prefix = _rgb((255, 112, 158), "💣 ", bold=True) if index == 2 else "   "
+            print(f"  {prefix}{_gradient_block_line(line, _BOOM_COLORS)}")
+            shadow = "  " + line.replace("█", "░")
+            print(f"      {_rgb(shadow_color, shadow, dim=True)}")
+        print()
+        print(f"      {_rgb((176, 126, 220), accent, dim=True)}")
+        print(f"  {divider}")
+        print()
+        return
+        accent = "pixel-powered code fixer for C#/Unity"
+        divider = _rgb((73, 20, 102), "· " * 18, dim=True)
+        bomb = _rgb((255, 112, 158), "💣", bold=True)
+        title = _gradient_text("BOOM-AI", _BOOM_COLORS)
+        print(f"  {divider}")
+        print(f"  {bomb} {title}")
+        print(f"  {_rgb((111, 32, 147), accent, dim=True)}")
+        print(f"  {divider}")
+    else:
+        print("  BOOM-AI")
+        print("  pixel-powered code fixer for C#/Unity")
     print()
 
 
@@ -245,6 +427,8 @@ def _format_elapsed(seconds: float) -> str:
 
 
 def print_review(review: ReviewSummary, applied: int = 0, elapsed: float = 0):
+    fixable = sum(1 for f in review.findings if f.suggestion and f.old_code)
+    non_fixable = len(review.findings) - fixable
     print(f"\n  {'='*56}")
     parts = [f"BoomAI Review — {len(review.findings)} issues"]
     if applied:
@@ -261,6 +445,7 @@ def print_review(review: ReviewSummary, applied: int = 0, elapsed: float = 0):
                 for model, bucket in review.usage.per_model.items()
             )
             print(f"  Models: {mixes}")
+    print(f"  Findings: {fixable} fixable | {non_fixable} non-fixable")
     print(f"  {'='*56}")
     print(f"\n  {review.summary}\n")
 
@@ -321,18 +506,24 @@ def _walk_files(repo_path: str) -> list[str]:
 def read_file_contents(
     files: list[str], repo_path: str = "."
 ) -> list[tuple[str, str]]:
-    """Read file contents, returning (path, content) pairs. Skips binary files."""
-    contents = []
-    for filepath in files:
+    """Read file contents in parallel, returning (path, content) pairs."""
+    def _read_one(filepath: str) -> tuple[str, str] | None:
         full_path = os.path.join(repo_path, filepath)
         try:
             with open(full_path, "r", encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
             if "\x00" in text[:8192]:
-                continue
-            contents.append((filepath, text))
+                return None
+            return (filepath, text)
         except OSError:
-            continue
+            return None
+
+    max_workers = min(32, max(4, (os.cpu_count() or 8) * 2))
+    contents: list[tuple[str, str]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for result in executor.map(_read_one, files):
+            if result is not None:
+                contents.append(result)
     return contents
 
 
@@ -440,8 +631,8 @@ def cmd_fix(args):
         print(f"    Use --include to narrow scope.")
         return
 
+    print("    Reading file contents...")
     file_contents = read_file_contents(reviewable, repo_path)
-    code_index = build_code_index(file_contents, languages)
 
     # ── Estimate cost & time ──────────────────────────────
     estimate = estimate_scan(
@@ -469,6 +660,8 @@ def cmd_fix(args):
         print("  Please enter Y or n.")
 
     # ── Scan ──────────────────────────────────────────────
+    print("  Building code index...")
+    code_index = build_code_index(file_contents, languages)
     t0 = time.monotonic()
     comments = settings.scan_comments
     explanations = settings.scan_explanations

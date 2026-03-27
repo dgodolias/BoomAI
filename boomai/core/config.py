@@ -23,8 +23,8 @@ class Settings(BaseSettings):
     scan_debug: bool = False
     scan_comments: bool = False
     scan_explanations: bool = True
-    scan_chunk_reserved_chars: int = 50000
-    scan_max_files_per_chunk: int = 24
+    scan_chunk_reserved_chars: int = 65000
+    scan_max_files_per_chunk: int = 18
     patch_timeout: float = 45.0
     patch_output_tokens: int = 4096
     patch_context_lines: int = 48

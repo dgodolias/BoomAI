@@ -396,6 +396,94 @@ def _is_fix_worthy(finding: ReviewComment) -> bool:
     return finding.severity == Severity.MEDIUM
 
 
+def _is_high_value_finding(finding: ReviewComment) -> bool:
+    """Filter out low-signal findings so final output stays bug-first."""
+    lowered = finding.body.lower()
+
+    if finding.severity in {Severity.CRITICAL, Severity.HIGH}:
+        return True
+
+    low_value_patterns = (
+        "redundant ternary",
+        "return condition directly",
+        "redundant count",
+        "redundant cast",
+        "empty start override",
+        "displayname getter allocates new string",
+        "active debug.logformat in production code",
+        "minor code smell",
+    )
+    if any(pattern in lowered for pattern in low_value_patterns):
+        return False
+
+    medium_keep_patterns = (
+        "memory leak",
+        "unsubscribe",
+        "null check",
+        "nullreference",
+        "invalidoperationexception",
+        "invalidcastexception",
+        "argumentoutofrange",
+        "dividebyzero",
+        "duplicate key",
+        "logic bug",
+        "runtime crash",
+        "off-by-one",
+        "double remove",
+        "bypass",
+        "skips",
+        "stale state",
+        "reflection",
+        "resistance",
+        "fast travel",
+        "frame stutters",
+        "disk load",
+        "resources.load",
+    )
+    if any(pattern in lowered for pattern in medium_keep_patterns):
+        return True
+
+    return finding.severity == Severity.MEDIUM and _is_fix_worthy(finding)
+
+
+def _filter_findings(review: ReviewSummary) -> ReviewSummary:
+    """Keep final findings focused on meaningful bugs and actionable risks."""
+    kept = [finding for finding in review.findings if _is_high_value_finding(finding)]
+    if len(kept) == len(review.findings):
+        return review
+    return ReviewSummary(
+        summary=review.summary,
+        findings=kept,
+        critical_count=review.critical_count,
+        has_critical=review.has_critical,
+        usage=review.usage,
+    )
+
+
+def _is_unavailable_summary(summary: str) -> bool:
+    return summary in {"AI review unavailable.", "Split required."}
+
+
+def _combine_review_summaries(
+    summaries: list[str],
+    *,
+    fallback: str = "AI review unavailable.",
+    force_recovered_text: bool = False,
+) -> str:
+    """Combine summaries while suppressing internal placeholders."""
+    informative = [
+        summary for summary in summaries
+        if summary and not _is_unavailable_summary(summary)
+    ]
+    if informative:
+        return " | ".join(informative)
+    if force_recovered_text:
+        return "Review completed from split sub-chunks."
+    if "Rate limited." in summaries:
+        return "Rate limited."
+    return fallback
+
+
 def _fix_priority(finding: ReviewComment) -> tuple[int, int]:
     """Sort findings so the most valuable auto-fixes run first."""
     severity_score = {
@@ -641,7 +729,7 @@ async def _attach_fixes_for_chunk(
 
     return ReviewSummary(
         summary=review.summary,
-        findings=updated,
+        findings=[finding for finding in updated if _is_high_value_finding(finding)],
         critical_count=review.critical_count,
         has_critical=review.has_critical,
         usage=review.usage,
@@ -885,10 +973,10 @@ async def _scan_chunk(
 
         max_snippets = 8
         max_snippet_chars = 12000
-        if len(file_contents) >= 24:
+        if len(file_contents) >= 18:
             max_snippets = 3
             max_snippet_chars = 3500
-        elif len(file_contents) >= 12:
+        elif len(file_contents) >= 10:
             max_snippets = 5
             max_snippet_chars = 6000
 
@@ -1012,14 +1100,14 @@ async def _scan_chunk(
     if parse_status in {"failed", "recovered"} and parse_retries_remaining > 0:
         should_split_large_chunk = (
             len(file_contents) > 4
-            or chunk_chars > 55_000
-            or len(user_message) > 75_000
+            or chunk_chars > 45_000
+            or len(user_message) > 60_000
         )
         if should_split_large_chunk:
             if on_progress:
                 reason = "partial JSON recovered" if parse_status == "recovered" else "malformed JSON response"
                 on_progress(f"  {chunk_info} - {reason}, returning split signal for large chunk")
-            return _fallback_review()
+            return _split_required_review()
         retry_note = ""
         if model_chain:
             failed_model = model_chain.current
@@ -1039,7 +1127,7 @@ async def _scan_chunk(
             code_index=code_index,
             parse_retries_remaining=parse_retries_remaining - 1,
         )
-    return parsed
+    return _filter_findings(parsed)
 
 
 async def scan_with_gemini(
@@ -1101,7 +1189,7 @@ async def scan_with_gemini(
             if result.summary == "Rate limited.":
                 _emit("Rate limited — aborting")
                 return result
-            if result.summary == "AI review unavailable." and len(chunk) > 1:
+            if _is_unavailable_summary(result.summary) and len(chunk) > 1:
                 mid = len(chunk) // 2
                 _emit(f"{label} failed — splitting and retrying")
                 a = await _review_single(chunk[:mid], f"{label}/a")
@@ -1109,7 +1197,10 @@ async def scan_with_gemini(
                 merged = list(a.findings) + list(b.findings)
                 crit = a.critical_count + b.critical_count
                 return ReviewSummary(
-                    summary=f"{a.summary} | {b.summary}",
+                    summary=_combine_review_summaries(
+                        [a.summary, b.summary],
+                        force_recovered_text=bool(merged),
+                    ),
                     findings=merged, critical_count=crit, has_critical=crit > 0,
                 )
             return await _attach_fixes_for_chunk(
@@ -1165,7 +1256,7 @@ async def scan_with_gemini(
                 stop_event.set()
             return result
         # If failed and chunk is splittable, split in half and retry
-        if result.summary == "AI review unavailable." and len(chunk) > 1:
+        if _is_unavailable_summary(result.summary) and len(chunk) > 1:
             mid = len(chunk) // 2
             _emit(f"{label} failed — splitting into 2 sub-chunks and retrying")
             sub_a = await _review_chunk(chunk[:mid], f"{label}/a")
@@ -1173,7 +1264,10 @@ async def scan_with_gemini(
             merged_findings = list(sub_a.findings) + list(sub_b.findings)
             merged_crit = sub_a.critical_count + sub_b.critical_count
             return ReviewSummary(
-                summary=f"{sub_a.summary} | {sub_b.summary}",
+                summary=_combine_review_summaries(
+                    [sub_a.summary, sub_b.summary],
+                    force_recovered_text=bool(merged_findings),
+                ),
                 findings=merged_findings,
                 critical_count=merged_crit,
                 has_critical=merged_crit > 0,
@@ -1219,7 +1313,11 @@ async def scan_with_gemini(
         summaries.append(result.summary)
         total_critical += result.critical_count
 
-    combined_summary = " | ".join(summaries)
+    combined_summary = _combine_review_summaries(
+        summaries,
+        fallback="AI review unavailable." if not all_findings else "Review completed.",
+        force_recovered_text=bool(all_findings),
+    )
     return ReviewSummary(
         summary=combined_summary,
         findings=all_findings,
@@ -1233,6 +1331,16 @@ def _fallback_review() -> ReviewSummary:
     """Return an empty review when Gemini fails."""
     return ReviewSummary(
         summary="AI review unavailable.",
+        findings=[],
+        critical_count=0,
+        has_critical=False,
+    )
+
+
+def _split_required_review() -> ReviewSummary:
+    """Internal sentinel used when a chunk should be recursively split."""
+    return ReviewSummary(
+        summary="Split required.",
         findings=[],
         critical_count=0,
         has_critical=False,
