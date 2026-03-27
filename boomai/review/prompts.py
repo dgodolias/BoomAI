@@ -59,6 +59,84 @@ _SECURITY_PATTERNS = [
 ]
 
 
+def build_scan_response_schema() -> dict:
+    """Return a JSON schema for findings-only scan responses."""
+    finding_schema = {
+        "type": "object",
+        "properties": {
+            "file": {"type": "string"},
+            "line": {"type": "integer"},
+            "end_line": {"type": "integer"},
+            "severity": {
+                "type": "string",
+                "enum": ["critical", "high", "medium", "low", "info"],
+            },
+            "message": {"type": "string"},
+        },
+        "required": ["file", "line", "severity", "message"],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "findings": {
+                "type": "array",
+                "items": finding_schema,
+            },
+            "critical_count": {"type": "integer"},
+        },
+        "required": ["summary", "findings", "critical_count"],
+        "additionalProperties": False,
+        "propertyOrdering": ["summary", "findings", "critical_count"],
+    }
+
+
+def build_fix_response_schema() -> dict:
+    """Return a JSON schema for a single structured edit."""
+    return {
+        "type": "object",
+        "properties": {
+            "file": {"type": "string"},
+            "line": {"type": "integer"},
+            "end_line": {"type": "integer"},
+            "message": {"type": "string"},
+            "old_code": {"type": "string"},
+            "suggestion": {"type": "string"},
+        },
+        "required": ["file", "line", "old_code", "suggestion"],
+        "additionalProperties": False,
+        "propertyOrdering": ["file", "line", "end_line", "message", "old_code", "suggestion"],
+    }
+
+
+def build_plan_response_schema() -> dict:
+    """Return a JSON schema for planning responses."""
+    return {
+        "type": "object",
+        "properties": {
+            "chunks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "dirs": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "focus": {"type": "string"},
+                    },
+                    "required": ["dirs"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["chunks"],
+        "additionalProperties": False,
+        "propertyOrdering": ["chunks"],
+    }
+
+
 def build_scan_system_prompt(
     detected_languages: list[str],
     comments: bool = False,
@@ -83,7 +161,7 @@ def build_scan_system_prompt(
         "- Check for missing error handling and edge cases",
         "- Validate static analysis findings (confirm real issues, flag false positives)",
         "- Use related cross-file context when it clarifies ownership, definitions, or call flow",
-        "- Provide actionable suggestions with corrected code",
+        "- Report actionable findings only; code fixes are generated in a separate pass",
         "",
         "## Focus Areas",
         "- Cross-file inconsistencies (naming, patterns, error handling)",
@@ -118,9 +196,7 @@ def build_scan_system_prompt(
         '      "file": "path/to/file.ext",',
         '      "line": 42,',
         '      "severity": "high",',
-        '      "message": "Clear explanation of the issue and WHY it matters",',
-        '      "old_code": "const x = foo.split(\\\':\\\')",',
-        '      "suggestion": "const [key, ...rest] = foo.split(\\\':\\\')\\nconst x = rest.join(\\\':\\\')"',
+        '      "message": "Clear explanation of the issue and WHY it matters"',
         "    }",
         "  ],",
         '  "critical_count": 0',
@@ -130,24 +206,11 @@ def build_scan_system_prompt(
         "- severity must be one of: critical, high, medium, low, info",
         "- line numbers are for reference only (to help locate the issue)",
         "",
-        "## Suggestion Rules (CRITICAL - read carefully)",
-        "- old_code: copy-paste the EXACT code that needs to be replaced (as it appears in the file, with original indentation)",
-        "- suggestion: the EXACT replacement code that should replace old_code",
-        "- Both old_code and suggestion must be valid, syntactically correct code",
-        "- NEVER put natural language instructions in old_code or suggestion",
-        "- Keep fixes SMALL and SURGICAL - fix ONE thing at a time (max ~30 lines)",
-        '- To DELETE dead/duplicate code, provide old_code and set suggestion to an empty string ("")',
-        "- If a fix requires very large restructuring (more than ~30 lines), describe it in `message` and OMIT old_code/suggestion",
-        "- If you cannot provide an exact fix, omit both old_code and suggestion",
+        "## Finding Rules",
+        "- Do NOT include code patches, old_code, suggestion, or diffs in this stage",
+        "- Prefer bugs, correctness issues, leaks, lifecycle errors, and meaningful performance issues",
+        "- Avoid noisy style-only findings unless they are truly high-value",
     ])
-
-    if comments:
-        parts.append(
-            "- Add a SHORT inline comment (e.g., `// BoomAI: fixed resource leak`) "
-            "on the FIRST changed line of each suggestion to explain the fix"
-        )
-    else:
-        parts.append("- Do NOT add any comments or annotations to the suggestion code")
 
     if not explanations:
         parts.append(
@@ -165,6 +228,88 @@ def build_scan_system_prompt(
     ])
 
     return "\n".join(parts)
+
+
+def build_fix_system_prompt(comments: bool = False) -> str:
+    """Build system prompt for single-finding patch generation."""
+    parts = [
+        "You are BoomAI's patch generation module.",
+        "You receive one previously-identified finding plus the target file and optional related snippets.",
+        "Generate ONE small, safe structured edit that fixes the finding.",
+        "",
+        "## Output Format",
+        "You MUST respond with valid JSON in this exact structure:",
+        "{",
+        '  "file": "path/to/file.ext",',
+        '  "line": 42,',
+        '  "end_line": 45,',
+        '  "message": "Short patch summary",',
+        '  "old_code": "exact code to replace",',
+        '  "suggestion": "exact replacement code"',
+        "}",
+        "",
+        "## Rules",
+        "- old_code must be copied EXACTLY from the target file with original indentation",
+        "- suggestion must be valid, syntactically correct code only",
+        "- NEVER return natural-language instructions in old_code or suggestion",
+        "- Keep the edit SMALL and SURGICAL (max about 30 changed lines)",
+        '- To delete code, set suggestion to an empty string ("")',
+        "- If you cannot produce a safe exact edit, return old_code and suggestion as empty strings",
+        "- Respond with JSON only",
+    ]
+    if comments:
+        parts.append("- Add one short BoomAI comment on the first changed line")
+    else:
+        parts.append("- Do NOT add comments or annotations")
+    return "\n".join(parts)
+
+
+def build_fix_user_message(
+    finding: IssueSeed | None,
+    review_finding,
+    target_file: str,
+    target_content: str,
+    related_snippets: list[ContextSnippet] | None = None,
+) -> str:
+    """Build user message for single-finding patch generation."""
+    related_snippets = related_snippets or []
+
+    related_context_text = ""
+    if related_snippets:
+        lines = ["## Related Cross-File Context"]
+        for snippet in related_snippets:
+            lines.append(f"### Context: {snippet.file}")
+            lines.append(f"Reason: {snippet.reason}")
+            lines.append("```")
+            lines.append(snippet.content)
+            lines.append("```")
+            lines.append("")
+        related_context_text = "\n".join(lines).rstrip()
+
+    seed_text = ""
+    if finding is not None:
+        seed_text = (
+            f"\nStatic hint: {finding.file}:{finding.line} "
+            f"[{finding.source.value}/{finding.severity.value}] {finding.rule_id}: {finding.message}"
+        )
+
+    return f"""## Single Finding Patch Generation
+
+Target finding:
+- File: {review_finding.file}
+- Line: {review_finding.line}
+- Severity: {review_finding.severity.value}
+- Message: {review_finding.body}{seed_text}
+
+## Target File
+### File: {target_file}
+```
+{target_content}
+```
+
+{related_context_text}
+
+Generate one exact structured edit for this finding only."""
 
 
 def build_plan_prompt(char_budget: int) -> str:

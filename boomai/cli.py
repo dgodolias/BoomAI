@@ -429,15 +429,19 @@ def cmd_fix(args):
         languages=languages,
     )
     format_estimate(estimate)
-
-    try:
-        answer = input("  Proceed? [Y/n] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        print("\n  Aborted.")
-        return
-    if answer and answer not in ("y", "yes", ""):
-        print("  Aborted.")
-        return
+    
+    while True:
+        try:
+            answer = input("  Proceed? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Aborted.")
+            return
+        if answer in ("", "y", "yes"):
+            break
+        if answer in ("n", "no"):
+            print("  Aborted.")
+            return
+        print("  Please enter Y or n.")
 
     # ── Scan ──────────────────────────────────────────────
     t0 = time.monotonic()

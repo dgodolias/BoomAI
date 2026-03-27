@@ -46,6 +46,7 @@ class ReviewComment(BaseModel):
     file: str
     line: int
     end_line: int | None = None
+    severity: Severity = Severity.MEDIUM
     body: str
     suggestion: str | None = None
     old_code: str | None = None

@@ -34,8 +34,8 @@ class ModelPricing:
 
 
 PRICING: list[tuple[str, ModelPricing]] = [
-    ("gemini-3.1-pro", ModelPricing(1.25, 10.00, "Gemini 3.1 Pro")),
-    ("gemini-3-flash",  ModelPricing(0.50,  3.00, "Gemini 3 Flash")),
+    ("gemini-3-pro-preview", ModelPricing(1.25, 10.00, "Gemini 3 Pro Preview")),
+    ("gemini-3-flash-preview",  ModelPricing(0.50,  3.00, "Gemini 3 Flash Preview")),
     ("gemini-2.5-pro",  ModelPricing(1.25, 10.00, "Gemini 2.5 Pro")),
     ("gemini-2.5-flash", ModelPricing(0.30,  2.50, "Gemini 2.5 Flash")),
 ]
@@ -82,7 +82,7 @@ def estimate_scan(
     languages: list[str] | None = None,
 ) -> ScanEstimate:
     """Estimate cost and time for a full codebase scan (no API calls)."""
-    from boomai.review.gemini_review import _chunk_files
+    from boomai.review.gemini_review import _chunk_files, _compute_scan_output_tokens
     from boomai.review.prompts import build_plan_prompt, build_scan_system_prompt
 
     total_chars = sum(len(c) for _, c in file_contents)
@@ -105,8 +105,13 @@ def estimate_scan(
 
     # Output tokens — range
     plan_output = int(plan_output_tokens * PLAN_OUTPUT_RATIO)
-    output_low = plan_output + chunk_count * int(scan_output_tokens * OUTPUT_RATIO_LOW)
-    output_high = plan_output + chunk_count * int(scan_output_tokens * OUTPUT_RATIO_HIGH)
+    output_low = plan_output
+    output_high = plan_output
+    for chunk in chunks:
+        chunk_chars = sum(len(c) for _, c in chunk)
+        chunk_cap = _compute_scan_output_tokens(chunk_chars, len(chunk))
+        output_low += int(chunk_cap * OUTPUT_RATIO_LOW)
+        output_high += int(chunk_cap * OUTPUT_RATIO_HIGH)
 
     # Cost range
     pricing, is_known = get_pricing(model)

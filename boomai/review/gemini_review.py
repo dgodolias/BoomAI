@@ -3,16 +3,19 @@
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Callable
 
 import httpx
 
 from ..core.config import settings
-from ..core.models import IssueSeed, ReviewComment, ReviewSummary, UsageStats
+from ..core.models import IssueSeed, ReviewComment, ReviewSummary, Severity, UsageStats
 from .prompts import (
     build_scan_system_prompt, build_scan_user_message,
-    build_plan_prompt, build_plan_user_message,
+    build_plan_prompt, build_plan_response_schema, build_plan_user_message,
+    build_scan_response_schema,
+    build_fix_response_schema, build_fix_system_prompt, build_fix_user_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,10 +25,11 @@ ProgressFn = Callable[[str], None] | None
 
 # Model fallback chain — each model has separate rate limits (RPM/RPD)
 _FALLBACK_MODELS = [
-    "gemini-3.1-pro-preview-customtools",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
     "gemini-2.5-pro",
-    "gemini-3-flash",
     "gemini-2.5-flash",
+    "gemini-2.5-flash-lite-preview-09-2025",
 ]
 
 
@@ -129,7 +133,6 @@ async def _gemini_post(
 
 def _sanitize_json(text: str) -> str:
     """Fix common Gemini JSON issues: trailing commas."""
-    import re
     text = re.sub(r',\s*([}\]])', r'\1', text)
     return text
 
@@ -144,6 +147,49 @@ def _compute_effective_timeout(chunk_chars: int, file_count: int) -> float:
     elif chunk_chars >= 60_000:
         timeout = max(timeout, settings.scan_timeout + 90)
     return timeout
+
+
+def _compute_scan_output_tokens(
+    chunk_chars: int,
+    file_count: int,
+    issue_seed_count: int = 0,
+) -> int:
+    """Choose a tighter output cap based on chunk complexity.
+
+    Keeps the configured setting as a hard upper bound while avoiding
+    a huge maxOutputTokens budget for small scans.
+    """
+    cap = 4096
+    if chunk_chars >= 50_000 or file_count >= 6:
+        cap = 8192
+    if chunk_chars >= 100_000 or file_count >= 10 or issue_seed_count >= 8:
+        cap = 16384
+    if chunk_chars >= 200_000 or file_count >= 20 or issue_seed_count >= 16:
+        cap = 24576
+    if chunk_chars >= 320_000 or file_count >= 35 or issue_seed_count >= 24:
+        cap = 32768
+    return min(settings.scan_output_tokens, cap)
+
+
+def _build_generation_config(
+    model_name: str,
+    max_output_tokens: int,
+    response_json_schema: dict | None = None,
+) -> dict:
+    """Build generation config with model-specific stability controls."""
+    config = {
+        "maxOutputTokens": max_output_tokens,
+        "temperature": 0.1,
+        "responseMimeType": "application/json",
+    }
+    if response_json_schema is not None:
+        config["responseJsonSchema"] = response_json_schema
+
+    lowered = model_name.lower()
+    if "2.5-flash" in lowered:
+        config["thinkingConfig"] = {"thinkingBudget": 0}
+
+    return config
 
 
 def _recover_truncated_json(text: str) -> dict | None:
@@ -195,16 +241,28 @@ def _recover_truncated_json(text: str) -> dict | None:
     return {"summary": summary, "findings": findings, "critical_count": 0}
 
 
-def _parse_review_response(text: str) -> ReviewSummary:
-    """Parse Gemini's JSON response into a ReviewSummary."""
+def _parse_review_response(text: str) -> tuple[ReviewSummary, str]:
+    """Parse Gemini's JSON response into a ReviewSummary.
+
+    Returns (summary, status) where status is one of:
+    - "full": parsed full JSON successfully
+    - "recovered": salvaged partial JSON after truncation
+    - "failed": could not recover a usable payload
+    """
     def _build_summary(data: dict) -> ReviewSummary:
         comments = []
         for f in data.get("findings", []):
+            raw_severity = str(f.get("severity", Severity.MEDIUM.value)).lower()
+            try:
+                severity = Severity(raw_severity)
+            except ValueError:
+                severity = Severity.MEDIUM
             comments.append(
                 ReviewComment(
                     file=f["file"],
                     line=f["line"],
                     end_line=f.get("end_line"),
+                    severity=severity,
                     body=f["message"],
                     suggestion=f.get("suggestion"),
                     old_code=f.get("old_code"),
@@ -223,7 +281,7 @@ def _parse_review_response(text: str) -> ReviewSummary:
         sanitized = _sanitize_json(text)
         decoder = json.JSONDecoder()
         data, _ = decoder.raw_decode(sanitized)
-        return _build_summary(data)
+        return _build_summary(data), "full"
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.warning(f"Failed to parse Gemini response: {e}\nRaw: {text[:500]}")
 
@@ -233,10 +291,237 @@ def _parse_review_response(text: str) -> ReviewSummary:
         logger.info(
             f"Recovered {len(recovered['findings'])} finding(s) from truncated Gemini response"
         )
-        return _build_summary(recovered)
+        return _build_summary(recovered), "recovered"
 
     logger.error("Gemini response unrecoverable — returning empty review")
-    return _fallback_review()
+    return _fallback_review(), "failed"
+
+
+# ============================================================
+#  Fix generation
+# ============================================================
+
+def _is_fix_worthy(finding: ReviewComment) -> bool:
+    """Return True when a finding should get a dedicated patch-generation pass."""
+    if finding.severity in {Severity.LOW, Severity.INFO}:
+        return False
+
+    lowered = finding.body.lower()
+    noisy_patterns = (
+        "incomplete feature",
+        "requires confirmation",
+        "needs to be confirmed",
+        "placeholder",
+        "todo",
+        "may be a bug",
+    )
+    if any(pattern in lowered for pattern in noisy_patterns):
+        return False
+
+    return True
+
+
+def _parse_fix_response(text: str, default_finding: ReviewComment) -> ReviewComment | None:
+    """Parse a single structured edit response."""
+    try:
+        sanitized = _sanitize_json(text)
+        decoder = json.JSONDecoder()
+        data, _ = decoder.raw_decode(sanitized)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    old_code = data.get("old_code", "")
+    suggestion = data.get("suggestion", "")
+    if not isinstance(old_code, str) or not isinstance(suggestion, str):
+        return None
+    if not old_code.strip() and not suggestion.strip():
+        return None
+
+    return ReviewComment(
+        file=str(data.get("file", default_finding.file)),
+        line=int(data.get("line", default_finding.line)),
+        end_line=data.get("end_line", default_finding.end_line),
+        severity=default_finding.severity,
+        body=str(data.get("message", default_finding.body)),
+        old_code=old_code,
+        suggestion=suggestion,
+    )
+
+
+async def _generate_fix_for_finding(
+    finding: ReviewComment,
+    repo_file_map: dict[str, str],
+    issue_seeds: list[IssueSeed] | None = None,
+    code_index=None,
+    comments: bool = False,
+    on_progress: ProgressFn = None,
+    usage: UsageStats | None = None,
+    model_chain: _ModelChain | None = None,
+    label: str = "",
+) -> ReviewComment | None:
+    """Generate one structured edit for a finding."""
+    target_content = repo_file_map.get(finding.file)
+    if target_content is None:
+        return None
+
+    related_snippets = []
+    matching_seed = None
+    if issue_seeds is not None:
+        for seed in issue_seeds:
+            if seed.file == finding.file and abs(seed.line - finding.line) <= 3:
+                matching_seed = seed
+                break
+
+    if code_index is not None:
+        from ..context.retriever import retrieve_related_context
+
+        retrieval = retrieve_related_context(
+            primary_files=[finding.file],
+            repo_file_map=repo_file_map,
+            code_index=code_index,
+            issue_seeds=[matching_seed] if matching_seed is not None else None,
+        )
+        related_snippets = retrieval.snippets[:4]
+
+    system_prompt = build_fix_system_prompt(comments=comments)
+    user_message = build_fix_user_message(
+        finding=matching_seed,
+        review_finding=finding,
+        target_file=finding.file,
+        target_content=target_content,
+        related_snippets=related_snippets,
+    )
+    output_tokens = min(settings.scan_output_tokens, 4096)
+    url = model_chain.build_url() if model_chain else (
+        f"{settings.gemini_base_url}/{settings.llm_model}"
+        f":generateContent?key={settings.google_api_key}"
+    )
+    effective_timeout = min(settings.scan_timeout, 90.0)
+
+    if settings.scan_debug and on_progress:
+        on_progress(
+            f"  {label} patch - prompt chars: system={len(system_prompt):,}, "
+            f"user={len(user_message):,}, model={model_chain.current if model_chain else settings.llm_model}"
+        )
+
+    try:
+        response = await _with_heartbeat(
+            asyncio.wait_for(
+                _gemini_post(url, {
+                    "system_instruction": {"parts": [{"text": system_prompt}]},
+                    "contents": [{"role": "user", "parts": [{"text": user_message}]}],
+                    "generationConfig": _build_generation_config(
+                        model_chain.current if model_chain else settings.llm_model,
+                        output_tokens,
+                        response_json_schema=build_fix_response_schema(),
+                    ),
+                }, timeout=effective_timeout),
+                timeout=effective_timeout,
+            ),
+            emit=on_progress,
+            label=f"{label} patch" if label else "Generating patch",
+        )
+    except asyncio.TimeoutError:
+        return None
+
+    if response is None:
+        return None
+    if response.status_code == 429 and model_chain:
+        failed_model = model_chain.current
+        next_model = await model_chain.advance(failed_model)
+        if next_model:
+            if on_progress:
+                on_progress(f"  {label} patch - rate limited on {failed_model}, switching to {next_model}")
+            return await _generate_fix_for_finding(
+                finding=finding,
+                repo_file_map=repo_file_map,
+                issue_seeds=issue_seeds,
+                code_index=code_index,
+                comments=comments,
+                on_progress=on_progress,
+                usage=usage,
+                model_chain=model_chain,
+                label=label,
+            )
+        return None
+    if response.status_code != 200:
+        return None
+
+    result = response.json()
+    if usage:
+        usage.add(result)
+    candidates = result.get("candidates") or []
+    if not candidates:
+        return None
+    try:
+        text = candidates[0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+    return _parse_fix_response(text, finding)
+
+
+async def _attach_fixes_for_chunk(
+    review: ReviewSummary,
+    repo_file_map: dict[str, str],
+    issue_seeds: list[IssueSeed] | None = None,
+    code_index=None,
+    comments: bool = False,
+    on_progress: ProgressFn = None,
+    usage: UsageStats | None = None,
+    chunk_label: str = "",
+) -> ReviewSummary:
+    """Generate patch suggestions in a second pass for actionable findings."""
+    if not review.findings:
+        return review
+
+    actionable = [finding for finding in review.findings if _is_fix_worthy(finding)]
+    if not actionable:
+        return review
+
+    model_chain = _ModelChain(settings.llm_model)
+    patch_index: dict[tuple[str, int, str], ReviewComment] = {}
+    for idx, finding in enumerate(actionable, 1):
+        label = f"{chunk_label} fix {idx}/{len(actionable)}".strip()
+        patch = await _generate_fix_for_finding(
+            finding=finding,
+            repo_file_map=repo_file_map,
+            issue_seeds=issue_seeds,
+            code_index=code_index,
+            comments=comments,
+            on_progress=on_progress,
+            usage=usage,
+            model_chain=model_chain,
+            label=label,
+        )
+        if patch is not None:
+            patch_index[(finding.file, finding.line, finding.body)] = patch
+
+    updated: list[ReviewComment] = []
+    for finding in review.findings:
+        patch = patch_index.get((finding.file, finding.line, finding.body))
+        if patch is None:
+            updated.append(finding)
+            continue
+        updated.append(
+            ReviewComment(
+                file=finding.file,
+                line=finding.line,
+                end_line=patch.end_line or finding.end_line,
+                severity=finding.severity,
+                body=finding.body,
+                old_code=patch.old_code,
+                suggestion=patch.suggestion,
+            )
+        )
+
+    return ReviewSummary(
+        summary=review.summary,
+        findings=updated,
+        critical_count=review.critical_count,
+        has_critical=review.has_critical,
+        usage=review.usage,
+    )
 
 
 # ============================================================
@@ -305,11 +590,11 @@ async def _plan_chunks(
                 _gemini_post(url, {
                     "system_instruction": {"parts": [{"text": system_prompt}]},
                     "contents": [{"role": "user", "parts": [{"text": user_message}]}],
-                    "generationConfig": {
-                        "maxOutputTokens": settings.plan_output_tokens,
-                        "temperature": 0.1,
-                        "responseMimeType": "application/json",
-                    },
+                    "generationConfig": _build_generation_config(
+                        model_chain.current if model_chain else settings.llm_model,
+                        settings.plan_output_tokens,
+                        response_json_schema=build_plan_response_schema(),
+                    ),
                 }, timeout=settings.plan_timeout, on_retry=_on_retry),
                 timeout=settings.plan_timeout,
             ),
@@ -458,6 +743,7 @@ async def _scan_chunk(
     repo_file_map: dict[str, str] | None = None,
     issue_seeds: list[IssueSeed] | None = None,
     code_index=None,
+    parse_retries_remaining: int = 1,
 ) -> ReviewSummary:
     """Send a single chunk of files to Gemini for scan review."""
     related_snippets = []
@@ -486,13 +772,19 @@ async def _scan_chunk(
         related_snippets=related_snippets,
     )
     chunk_chars = sum(len(content) for _, content in file_contents)
+    output_tokens = _compute_scan_output_tokens(
+        chunk_chars,
+        len(file_contents),
+        len(chunk_issue_seeds),
+    )
 
     if settings.scan_debug and on_progress:
         on_progress(
             f"  {chunk_info} - prompt chars: "
             f"system={len(system_prompt):,}, user={len(user_message):,}, "
             f"chunk={chunk_chars:,}, files={len(file_contents)}, "
-            f"issue_seeds={len(chunk_issue_seeds)}, snippets={len(related_snippets)}"
+            f"issue_seeds={len(chunk_issue_seeds)}, snippets={len(related_snippets)}, "
+            f"max_output_tokens={output_tokens:,}, model={model_chain.current if model_chain else settings.llm_model}"
         )
 
     url = model_chain.build_url() if model_chain else (
@@ -513,11 +805,11 @@ async def _scan_chunk(
                 _gemini_post(url, {
                     "system_instruction": {"parts": [{"text": system_prompt}]},
                     "contents": [{"role": "user", "parts": [{"text": user_message}]}],
-                    "generationConfig": {
-                        "maxOutputTokens": settings.scan_output_tokens,
-                        "temperature": 0.1,
-                        "responseMimeType": "application/json",
-                    },
+                    "generationConfig": _build_generation_config(
+                        model_chain.current if model_chain else settings.llm_model,
+                        output_tokens,
+                        response_json_schema=build_scan_response_schema(),
+                    ),
                 }, timeout=effective_timeout, on_retry=_on_retry),
                 timeout=effective_timeout,
             ),
@@ -546,6 +838,7 @@ async def _scan_chunk(
                     repo_file_map=repo_file_map,
                     issue_seeds=issue_seeds,
                     code_index=code_index,
+                    parse_retries_remaining=parse_retries_remaining,
                 )
         logger.error("Rate limited (429) — no fallback models left")
         return _rate_limited_review()
@@ -572,7 +865,28 @@ async def _scan_chunk(
         return _fallback_review()
 
     text = candidate["content"]["parts"][0]["text"]
-    return _parse_review_response(text)
+    parsed, parse_status = _parse_review_response(text)
+    if parse_status in {"failed", "recovered"} and parse_retries_remaining > 0:
+        retry_note = ""
+        if model_chain:
+            failed_model = model_chain.current
+            next_model = await model_chain.advance(failed_model)
+            if next_model:
+                retry_note = f", switching to {next_model}"
+        if on_progress:
+            reason = "partial JSON recovered" if parse_status == "recovered" else "malformed JSON response"
+            on_progress(f"  {chunk_info} - {reason}, retrying once{retry_note}")
+        return await _scan_chunk(
+            file_contents, detected_languages, chunk_info,
+            comments=comments, explanations=explanations,
+            on_progress=on_progress, model_chain=model_chain,
+            usage=usage,
+            repo_file_map=repo_file_map,
+            issue_seeds=issue_seeds,
+            code_index=code_index,
+            parse_retries_remaining=parse_retries_remaining - 1,
+        )
+    return parsed
 
 
 async def scan_with_gemini(
@@ -597,7 +911,7 @@ async def scan_with_gemini(
         if on_progress:
             on_progress(msg)
 
-    model_chain = _ModelChain(settings.llm_model)
+    plan_model_chain = _ModelChain(settings.llm_model)
     usage = UsageStats()
     repo_file_map = {path: content for path, content in file_contents}
 
@@ -605,12 +919,12 @@ async def scan_with_gemini(
     _emit("Planning review chunks...")
     chunks = await _plan_chunks(
         file_contents, detected_languages, settings.max_scan_chars,
-        on_progress=on_progress, model_chain=model_chain, usage=usage,
+        on_progress=on_progress, model_chain=plan_model_chain, usage=usage,
     )
     if chunks is None:
         _emit("Using greedy chunking")
         chunks = _chunk_files(file_contents, settings.max_scan_chars)
-    _emit(f"{len(chunks)} chunk(s) planned, model: {model_chain.current}")
+    _emit(f"{len(chunks)} chunk(s) planned, model: {plan_model_chain.current}")
 
     if len(chunks) == 1:
         chars = sum(len(c) for _, c in chunks[0])
@@ -620,10 +934,11 @@ async def scan_with_gemini(
         async def _review_single(
             chunk: list[tuple[str, str]], label: str,
         ) -> ReviewSummary:
+            chunk_model_chain = _ModelChain(settings.llm_model)
             result = await _scan_chunk(
                 chunk, detected_languages, label,
                 comments=comments, explanations=explanations,
-                on_progress=on_progress, model_chain=model_chain,
+                on_progress=on_progress, model_chain=chunk_model_chain,
                 usage=usage,
                 repo_file_map=repo_file_map,
                 issue_seeds=issue_seeds,
@@ -644,7 +959,16 @@ async def scan_with_gemini(
                     summary=f"{a.summary} | {b.summary}",
                     findings=merged, critical_count=crit, has_critical=crit > 0,
                 )
-            return result
+            return await _attach_fixes_for_chunk(
+                result,
+                repo_file_map=repo_file_map,
+                issue_seeds=issue_seeds,
+                code_index=code_index,
+                comments=comments,
+                on_progress=on_progress,
+                usage=usage,
+                chunk_label=label,
+            )
 
         result = await _review_single(chunks[0], "Chunk 1/1")
         result.usage = usage
@@ -668,10 +992,11 @@ async def scan_with_gemini(
             return _rate_limited_review()
         chars = sum(len(c) for _, c in chunk)
         _emit(f"{label} {len(chunk)} files, {chars:,} chars...")
+        chunk_model_chain = _ModelChain(settings.llm_model)
         result = await _scan_chunk(
             chunk, detected_languages, label,
             comments=comments, explanations=explanations,
-            on_progress=on_progress, model_chain=model_chain,
+            on_progress=on_progress, model_chain=chunk_model_chain,
             usage=usage,
             repo_file_map=repo_file_map,
             issue_seeds=issue_seeds,
@@ -697,7 +1022,16 @@ async def scan_with_gemini(
                 critical_count=merged_crit,
                 has_critical=merged_crit > 0,
             )
-        return result
+        return await _attach_fixes_for_chunk(
+            result,
+            repo_file_map=repo_file_map,
+            issue_seeds=issue_seeds,
+            code_index=code_index,
+            comments=comments,
+            on_progress=on_progress,
+            usage=usage,
+            chunk_label=label,
+        )
 
     async def _scan_with_sem(
         chunk: list[tuple[str, str]], idx: int,
