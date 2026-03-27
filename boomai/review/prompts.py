@@ -250,6 +250,7 @@ def build_fix_system_prompt(comments: bool = False) -> str:
         "",
         "## Rules",
         "- old_code must be copied EXACTLY from the target file with original indentation",
+        "- Prefer the SMALLEST unique exact snippet that identifies the change safely",
         "- suggestion must be valid, syntactically correct code only",
         "- NEVER return natural-language instructions in old_code or suggestion",
         "- Keep the edit SMALL and SURGICAL (max about 30 changed lines)",

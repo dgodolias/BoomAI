@@ -23,12 +23,14 @@ class Settings(BaseSettings):
     scan_debug: bool = False
     scan_comments: bool = False
     scan_explanations: bool = True
-    scan_chunk_reserved_chars: int = 30000
-    scan_max_files_per_chunk: int = 40
+    scan_chunk_reserved_chars: int = 50000
+    scan_max_files_per_chunk: int = 24
     patch_timeout: float = 45.0
     patch_output_tokens: int = 4096
     patch_context_lines: int = 48
-    patch_max_concurrency: int = 3
+    patch_max_concurrency: int = 4
+    scan_pro_max_concurrency: int = 2
+    scan_flash_max_concurrency: int = 4
     patch_max_findings_per_chunk: int = 5
 
     # Scan planning (repo-map phase)

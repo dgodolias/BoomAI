@@ -184,6 +184,32 @@ def _effective_scan_char_budget(char_budget: int) -> int:
     return max(40_000, char_budget - settings.scan_chunk_reserved_chars)
 
 
+def _compute_scan_concurrency(model_name: str, chunk_count: int) -> int:
+    """Choose safer concurrency for pro models and higher throughput for flash."""
+    lowered = model_name.lower()
+    if "flash" in lowered:
+        limit = settings.scan_flash_max_concurrency
+        if chunk_count >= 12:
+            limit = min(limit, 3)
+        return max(1, limit)
+
+    limit = settings.scan_pro_max_concurrency
+    if chunk_count <= 3:
+        limit = min(limit + 1, settings.scan_flash_max_concurrency)
+    return max(1, limit)
+
+
+def _compute_patch_concurrency(model_name: str, patch_count: int) -> int:
+    """Use more parallelism for flash patch generation, less for pro."""
+    lowered = model_name.lower()
+    limit = settings.patch_max_concurrency
+    if "flash" not in lowered:
+        limit = min(limit, 2)
+    if patch_count <= 2:
+        limit = min(limit, patch_count)
+    return max(1, limit)
+
+
 def _build_generation_config(
     model_name: str,
     max_output_tokens: int,
@@ -563,9 +589,15 @@ async def _attach_fixes_for_chunk(
 
     actionable.sort(key=_fix_priority, reverse=True)
     actionable = actionable[: settings.patch_max_findings_per_chunk]
+    if on_progress and len(actionable) > 1:
+        on_progress(
+            f"  {chunk_label} patching {len(actionable)} finding(s) "
+            f"[{_compute_patch_concurrency(settings.patch_llm_model, len(actionable))} concurrent]"
+        )
 
     patch_index: dict[tuple[str, int, str], ReviewComment] = {}
-    sem = asyncio.Semaphore(max(1, settings.patch_max_concurrency))
+    patch_concurrency = _compute_patch_concurrency(settings.patch_llm_model, len(actionable))
+    sem = asyncio.Semaphore(patch_concurrency)
 
     async def _run_patch(idx: int, finding: ReviewComment) -> ReviewComment | None:
         async with sem:
@@ -853,12 +885,12 @@ async def _scan_chunk(
 
         max_snippets = 8
         max_snippet_chars = 12000
-        if len(file_contents) >= 40:
-            max_snippets = 4
-            max_snippet_chars = 5000
-        elif len(file_contents) >= 20:
-            max_snippets = 6
-            max_snippet_chars = 8000
+        if len(file_contents) >= 24:
+            max_snippets = 3
+            max_snippet_chars = 3500
+        elif len(file_contents) >= 12:
+            max_snippets = 5
+            max_snippet_chars = 6000
 
         retrieval = retrieve_related_context(
             primary_files=[path for path, _ in file_contents],
@@ -978,6 +1010,16 @@ async def _scan_chunk(
     text = candidate["content"]["parts"][0]["text"]
     parsed, parse_status = _parse_review_response(text)
     if parse_status in {"failed", "recovered"} and parse_retries_remaining > 0:
+        should_split_large_chunk = (
+            len(file_contents) > 4
+            or chunk_chars > 55_000
+            or len(user_message) > 75_000
+        )
+        if should_split_large_chunk:
+            if on_progress:
+                reason = "partial JSON recovered" if parse_status == "recovered" else "malformed JSON response"
+                on_progress(f"  {chunk_info} - {reason}, returning split signal for large chunk")
+            return _fallback_review()
         retry_note = ""
         if model_chain:
             failed_model = model_chain.current
@@ -1062,8 +1104,8 @@ async def scan_with_gemini(
             if result.summary == "AI review unavailable." and len(chunk) > 1:
                 mid = len(chunk) // 2
                 _emit(f"{label} failed — splitting and retrying")
-                a = await _review_single(chunk[:mid], f"{label}a")
-                b = await _review_single(chunk[mid:], f"{label}b")
+                a = await _review_single(chunk[:mid], f"{label}/a")
+                b = await _review_single(chunk[mid:], f"{label}/b")
                 merged = list(a.findings) + list(b.findings)
                 crit = a.critical_count + b.critical_count
                 return ReviewSummary(
@@ -1089,11 +1131,14 @@ async def scan_with_gemini(
         return result
 
     # Multiple chunks — call Gemini concurrently, merge results
-    max_concurrent = 3 if len(chunks) <= 20 else 2
+    max_concurrent = _compute_scan_concurrency(settings.llm_model, len(chunks))
     sem = asyncio.Semaphore(max_concurrent)
     stop_event = asyncio.Event()  # set on 429 — stops all remaining chunks
     completed = 0
-    _emit(f"Reviewing code [{len(chunks)} chunks, {max_concurrent} concurrent]")
+    _emit(
+        f"Reviewing code [{len(chunks)} chunks, {max_concurrent} concurrent, "
+        f"model={settings.llm_model}]"
+    )
 
     async def _review_chunk(
         chunk: list[tuple[str, str]], label: str,
@@ -1123,8 +1168,8 @@ async def scan_with_gemini(
         if result.summary == "AI review unavailable." and len(chunk) > 1:
             mid = len(chunk) // 2
             _emit(f"{label} failed — splitting into 2 sub-chunks and retrying")
-            sub_a = await _review_chunk(chunk[:mid], f"{label}a")
-            sub_b = await _review_chunk(chunk[mid:], f"{label}b")
+            sub_a = await _review_chunk(chunk[:mid], f"{label}/a")
+            sub_b = await _review_chunk(chunk[mid:], f"{label}/b")
             merged_findings = list(sub_a.findings) + list(sub_b.findings)
             merged_crit = sub_a.critical_count + sub_b.critical_count
             return ReviewSummary(

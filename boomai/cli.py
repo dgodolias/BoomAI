@@ -8,6 +8,7 @@ Usage (from inside your project):
 
 import argparse
 import asyncio
+import difflib
 import logging
 import os
 import subprocess
@@ -128,6 +129,26 @@ def _line_match(content: str, old_code: str, hint_line: int) -> tuple[int, int] 
             if distance < best_distance:
                 best_distance = distance
                 best = (i, n)
+    if best is not None:
+        return best
+
+    # Pass 3: fuzzy fallback near the hinted location for minor model drift
+    max_start = len(content_lines) - n
+    if max_start < 0:
+        return None
+    search_start = max(0, hint_line - 1 - 25)
+    search_end = min(max_start, hint_line - 1 + 25)
+    best_score = 0.0
+    old_joined = "\n".join(old_fully_stripped)
+    for i in range(search_start, max(search_start, search_end) + 1):
+        window = [content_lines[i + j].strip() for j in range(n)]
+        score = difflib.SequenceMatcher(None, old_joined, "\n".join(window)).ratio()
+        if score > best_score:
+            best_score = score
+            best = (i, n)
+
+    if best is not None and best_score >= 0.94:
+        return best
 
     return best
 
