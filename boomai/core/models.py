@@ -58,12 +58,22 @@ class UsageStats:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     api_calls: int = 0
+    per_model: dict[str, dict[str, int]] = field(default_factory=dict)
 
-    def add(self, result: dict) -> None:
+    def add(self, result: dict, model_name: str | None = None) -> None:
         meta = result.get("usageMetadata", {})
-        self.prompt_tokens += meta.get("promptTokenCount", 0)
-        self.completion_tokens += meta.get("candidatesTokenCount", 0)
+        prompt = meta.get("promptTokenCount", 0)
+        completion = meta.get("candidatesTokenCount", 0)
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
         self.api_calls += 1
+        if model_name:
+            bucket = self.per_model.setdefault(
+                model_name, {"prompt_tokens": 0, "completion_tokens": 0, "api_calls": 0}
+            )
+            bucket["prompt_tokens"] += prompt
+            bucket["completion_tokens"] += completion
+            bucket["api_calls"] += 1
 
 
 class ReviewSummary(BaseModel):

@@ -32,12 +32,20 @@ _FALLBACK_MODELS = [
     "gemini-2.5-flash-lite-preview-09-2025",
 ]
 
+_PATCH_FALLBACK_MODELS = [
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite-preview-09-2025",
+    "gemini-3-pro-preview",
+    "gemini-2.5-pro",
+]
+
 
 class _ModelChain:
     """Thread-safe model fallback chain for 429 rate limits."""
 
-    def __init__(self, initial_model: str):
-        self._models = list(_FALLBACK_MODELS)
+    def __init__(self, initial_model: str, models: list[str] | None = None):
+        self._models = list(models or _FALLBACK_MODELS)
         try:
             self._index = self._models.index(initial_model)
         except ValueError:
@@ -171,6 +179,11 @@ def _compute_scan_output_tokens(
     return min(settings.scan_output_tokens, cap)
 
 
+def _effective_scan_char_budget(char_budget: int) -> int:
+    """Reserve room for prompt wrappers, issue seeds, and related snippets."""
+    return max(40_000, char_budget - settings.scan_chunk_reserved_chars)
+
+
 def _build_generation_config(
     model_name: str,
     max_output_tokens: int,
@@ -186,7 +199,7 @@ def _build_generation_config(
         config["responseJsonSchema"] = response_json_schema
 
     lowered = model_name.lower()
-    if "2.5-flash" in lowered:
+    if "flash" in lowered:
         config["thinkingConfig"] = {"thinkingBudget": 0}
 
     return config
@@ -303,9 +316,6 @@ def _parse_review_response(text: str) -> tuple[ReviewSummary, str]:
 
 def _is_fix_worthy(finding: ReviewComment) -> bool:
     """Return True when a finding should get a dedicated patch-generation pass."""
-    if finding.severity in {Severity.LOW, Severity.INFO}:
-        return False
-
     lowered = finding.body.lower()
     noisy_patterns = (
         "incomplete feature",
@@ -318,7 +328,77 @@ def _is_fix_worthy(finding: ReviewComment) -> bool:
     if any(pattern in lowered for pattern in noisy_patterns):
         return False
 
-    return True
+    if finding.severity in {Severity.CRITICAL, Severity.HIGH}:
+        return True
+
+    if finding.severity in {Severity.LOW, Severity.INFO}:
+        return False
+
+    strong_fix_patterns = (
+        "memory leak",
+        "unsubscribe",
+        "unsubscription",
+        "missing ondestroy",
+        "missing null check",
+        "null reference",
+        "duplicate key",
+        "off-by-one",
+        "invalidcastexception",
+        "argumentoutofrange",
+        "returns early instead of continue",
+        "double remove",
+        "bypassing effect cleanup",
+        "leaks gameobject",
+        "skipping remaining",
+    )
+    perf_only_patterns = (
+        "gc pressure",
+        "console spam",
+        "string concatenation",
+        "linq allocations",
+        "list allocation",
+        "allocates list",
+        "allocates memory",
+        "called in hot path",
+    )
+
+    if any(pattern in lowered for pattern in strong_fix_patterns):
+        return True
+    if any(pattern in lowered for pattern in perf_only_patterns):
+        return False
+
+    return finding.severity == Severity.MEDIUM
+
+
+def _fix_priority(finding: ReviewComment) -> tuple[int, int]:
+    """Sort findings so the most valuable auto-fixes run first."""
+    severity_score = {
+        Severity.CRITICAL: 4,
+        Severity.HIGH: 3,
+        Severity.MEDIUM: 2,
+        Severity.LOW: 1,
+        Severity.INFO: 0,
+    }[finding.severity]
+    lowered = finding.body.lower()
+    safety_bonus = 0
+    if any(token in lowered for token in ("memory leak", "null", "duplicate key", "off-by-one", "unsubscribe")):
+        safety_bonus = 2
+    elif any(token in lowered for token in ("invalidcast", "argumentoutofrange", "cleanup", "continue")):
+        safety_bonus = 1
+    return (severity_score, safety_bonus)
+
+
+def _extract_patch_context(content: str, line: int) -> tuple[str, str]:
+    """Return a bounded line window around the finding for patch generation."""
+    lines = content.replace("\r\n", "\n").split("\n")
+    if not lines:
+        return ("whole file", content)
+
+    radius = max(12, settings.patch_context_lines)
+    start = max(0, line - 1 - radius)
+    end = min(len(lines), line - 1 + radius + 1)
+    snippet = "\n".join(lines[start:end])
+    return (f"lines {start + 1}-{end}", snippet)
 
 
 def _parse_fix_response(text: str, default_finding: ReviewComment) -> ReviewComment | None:
@@ -363,6 +443,7 @@ async def _generate_fix_for_finding(
     target_content = repo_file_map.get(finding.file)
     if target_content is None:
         return None
+    target_context_label, target_context = _extract_patch_context(target_content, finding.line)
 
     related_snippets = []
     matching_seed = None
@@ -381,27 +462,28 @@ async def _generate_fix_for_finding(
             code_index=code_index,
             issue_seeds=[matching_seed] if matching_seed is not None else None,
         )
-        related_snippets = retrieval.snippets[:4]
+        related_snippets = retrieval.snippets[:2]
 
     system_prompt = build_fix_system_prompt(comments=comments)
     user_message = build_fix_user_message(
         finding=matching_seed,
         review_finding=finding,
         target_file=finding.file,
-        target_content=target_content,
+        target_content=target_context,
+        target_context_label=target_context_label,
         related_snippets=related_snippets,
     )
-    output_tokens = min(settings.scan_output_tokens, 4096)
+    output_tokens = settings.patch_output_tokens
     url = model_chain.build_url() if model_chain else (
-        f"{settings.gemini_base_url}/{settings.llm_model}"
+        f"{settings.gemini_base_url}/{settings.patch_llm_model}"
         f":generateContent?key={settings.google_api_key}"
     )
-    effective_timeout = min(settings.scan_timeout, 90.0)
+    effective_timeout = settings.patch_timeout
 
     if settings.scan_debug and on_progress:
         on_progress(
             f"  {label} patch - prompt chars: system={len(system_prompt):,}, "
-            f"user={len(user_message):,}, model={model_chain.current if model_chain else settings.llm_model}"
+            f"user={len(user_message):,}, model={model_chain.current if model_chain else settings.patch_llm_model}"
         )
 
     try:
@@ -449,7 +531,7 @@ async def _generate_fix_for_finding(
 
     result = response.json()
     if usage:
-        usage.add(result)
+        usage.add(result, model_chain.current if model_chain else settings.patch_llm_model)
     candidates = result.get("candidates") or []
     if not candidates:
         return None
@@ -479,21 +561,31 @@ async def _attach_fixes_for_chunk(
     if not actionable:
         return review
 
-    model_chain = _ModelChain(settings.llm_model)
+    actionable.sort(key=_fix_priority, reverse=True)
+    actionable = actionable[: settings.patch_max_findings_per_chunk]
+
     patch_index: dict[tuple[str, int, str], ReviewComment] = {}
-    for idx, finding in enumerate(actionable, 1):
-        label = f"{chunk_label} fix {idx}/{len(actionable)}".strip()
-        patch = await _generate_fix_for_finding(
-            finding=finding,
-            repo_file_map=repo_file_map,
-            issue_seeds=issue_seeds,
-            code_index=code_index,
-            comments=comments,
-            on_progress=on_progress,
-            usage=usage,
-            model_chain=model_chain,
-            label=label,
-        )
+    sem = asyncio.Semaphore(max(1, settings.patch_max_concurrency))
+
+    async def _run_patch(idx: int, finding: ReviewComment) -> ReviewComment | None:
+        async with sem:
+            label = f"{chunk_label} fix {idx}/{len(actionable)}".strip()
+            return await _generate_fix_for_finding(
+                finding=finding,
+                repo_file_map=repo_file_map,
+                issue_seeds=issue_seeds,
+                code_index=code_index,
+                comments=comments,
+                on_progress=on_progress,
+                usage=usage,
+                model_chain=_ModelChain(settings.patch_llm_model, models=_PATCH_FALLBACK_MODELS),
+                label=label,
+            )
+
+    patches = await asyncio.gather(
+        *[_run_patch(idx, finding) for idx, finding in enumerate(actionable, 1)]
+    )
+    for finding, patch in zip(actionable, patches):
         if patch is not None:
             patch_index[(finding.file, finding.line, finding.body)] = patch
 
@@ -623,7 +715,7 @@ async def _plan_chunks(
     try:
         result = response.json()
         if usage:
-            usage.add(result)
+            usage.add(result, model_chain.current if model_chain else settings.llm_model)
         text = result["candidates"][0]["content"]["parts"][0]["text"]
         sanitized = _sanitize_json(text)
         data = json.loads(sanitized)
@@ -691,10 +783,11 @@ async def _plan_chunks(
     # LLM often ignores char budget when dirs are individually large
     final_chunks: list[list[tuple[str, str]]] = []
     focus_list = [c.get("focus", "") for c in data.get("chunks", [])]
+    effective_budget = _effective_scan_char_budget(char_budget)
     for i, ch in enumerate(planned_chunks):
         chars = sum(len(c) for _, c in ch)
         focus = f" — {focus_list[i]}" if i < len(focus_list) and focus_list[i] else ""
-        if chars > char_budget:
+        if chars > effective_budget or len(ch) > settings.scan_max_files_per_chunk:
             sub = _chunk_files(ch, char_budget)
             _emit(f"  Chunk {i+1}: {len(ch)} files, {chars:,} chars → split into {len(sub)} sub-chunks{focus}")
             final_chunks.extend(sub)
@@ -709,6 +802,7 @@ def _chunk_files(
     char_budget: int,
 ) -> list[list[tuple[str, str]]]:
     """Split files into chunks that fit within the character budget."""
+    effective_budget = _effective_scan_char_budget(char_budget)
     chunks: list[list[tuple[str, str]]] = []
     current_chunk: list[tuple[str, str]] = []
     current_size = 0
@@ -718,7 +812,13 @@ def _chunk_files(
 
     for path, content in sorted_files:
         file_size = len(content) + len(path) + 20  # header overhead
-        if current_size + file_size > char_budget and current_chunk:
+        needs_split = (
+            current_chunk and (
+                current_size + file_size > effective_budget
+                or len(current_chunk) >= settings.scan_max_files_per_chunk
+            )
+        )
+        if needs_split:
             chunks.append(current_chunk)
             current_chunk = []
             current_size = 0
@@ -751,11 +851,22 @@ async def _scan_chunk(
     if repo_file_map is not None:
         from ..context.retriever import retrieve_related_context
 
+        max_snippets = 8
+        max_snippet_chars = 12000
+        if len(file_contents) >= 40:
+            max_snippets = 4
+            max_snippet_chars = 5000
+        elif len(file_contents) >= 20:
+            max_snippets = 6
+            max_snippet_chars = 8000
+
         retrieval = retrieve_related_context(
             primary_files=[path for path, _ in file_contents],
             repo_file_map=repo_file_map,
             code_index=code_index,
             issue_seeds=issue_seeds,
+            max_snippets=max_snippets,
+            max_snippet_chars=max_snippet_chars,
         )
         related_snippets = retrieval.snippets
         chunk_issue_seeds = retrieval.issue_seeds
@@ -849,7 +960,7 @@ async def _scan_chunk(
 
     result = response.json()
     if usage:
-        usage.add(result)
+        usage.add(result, model_chain.current if model_chain else settings.llm_model)
 
     if "error" in result:
         logger.error(f"Gemini API error: {result['error'].get('message', 'Unknown')}")

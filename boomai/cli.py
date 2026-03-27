@@ -233,11 +233,13 @@ def print_review(review: ReviewSummary, applied: int = 0, elapsed: float = 0):
     print(f"  {' | '.join(parts)}")
     if review.usage and review.usage.api_calls > 0:
         from boomai.review.estimator import format_actual_cost
-        print(format_actual_cost(
-            review.usage.prompt_tokens,
-            review.usage.completion_tokens,
-            settings.llm_model,
-        ))
+        print(format_actual_cost(review.usage))
+        if len(review.usage.per_model) > 1:
+            mixes = ", ".join(
+                f"{model} x{bucket['api_calls']}"
+                for model, bucket in review.usage.per_model.items()
+            )
+            print(f"  Models: {mixes}")
     print(f"  {'='*56}")
     print(f"\n  {review.summary}\n")
 
@@ -423,6 +425,7 @@ def cmd_fix(args):
     estimate = estimate_scan(
         file_contents=file_contents,
         model=settings.llm_model,
+        patch_model=settings.patch_llm_model,
         max_scan_chars=settings.max_scan_chars,
         scan_output_tokens=settings.scan_output_tokens,
         plan_output_tokens=settings.plan_output_tokens,

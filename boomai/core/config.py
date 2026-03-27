@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     # Gemini API (same pattern as DataViz)
     google_api_key: str = ""
     llm_model: str = "gemini-3-pro-preview"
+    patch_llm_model: str = "gemini-3-flash-preview"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/models"
     max_output_tokens: int = 32768
     llm_timeout: float = 300.0
@@ -22,6 +23,13 @@ class Settings(BaseSettings):
     scan_debug: bool = False
     scan_comments: bool = False
     scan_explanations: bool = True
+    scan_chunk_reserved_chars: int = 30000
+    scan_max_files_per_chunk: int = 40
+    patch_timeout: float = 45.0
+    patch_output_tokens: int = 4096
+    patch_context_lines: int = 48
+    patch_max_concurrency: int = 3
+    patch_max_findings_per_chunk: int = 5
 
     # Scan planning (repo-map phase)
     plan_output_tokens: int = 65536

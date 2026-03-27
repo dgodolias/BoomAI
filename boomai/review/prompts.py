@@ -269,6 +269,7 @@ def build_fix_user_message(
     review_finding,
     target_file: str,
     target_content: str,
+    target_context_label: str,
     related_snippets: list[ContextSnippet] | None = None,
 ) -> str:
     """Build user message for single-finding patch generation."""
@@ -301,15 +302,16 @@ Target finding:
 - Severity: {review_finding.severity.value}
 - Message: {review_finding.body}{seed_text}
 
-## Target File
-### File: {target_file}
+## Target File Context
+### File: {target_file} ({target_context_label})
 ```
 {target_content}
 ```
 
 {related_context_text}
 
-Generate one exact structured edit for this finding only."""
+Generate one exact structured edit for this finding only.
+Use ONLY the target file context above when copying old_code."""
 
 
 def build_plan_prompt(char_budget: int) -> str:
