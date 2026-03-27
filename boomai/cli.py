@@ -15,9 +15,11 @@ import sys
 import time
 from pathlib import Path
 
-from boomai.config import settings
-from boomai.languages import detect_languages, filter_reviewable_files
-from boomai.models import ReviewSummary
+from boomai.analysis.languages import detect_languages, filter_reviewable_files
+from boomai.app.orchestrator import run_static_analysis_suite
+from boomai.context.indexer import build_code_index
+from boomai.core.config import settings
+from boomai.core.models import ReviewSummary
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +232,7 @@ def print_review(review: ReviewSummary, applied: int = 0, elapsed: float = 0):
         parts.append(_format_elapsed(elapsed))
     print(f"  {' | '.join(parts)}")
     if review.usage and review.usage.api_calls > 0:
-        from boomai.estimator import format_actual_cost
+        from boomai.review.estimator import format_actual_cost
         print(format_actual_cost(
             review.usage.prompt_tokens,
             review.usage.completion_tokens,
@@ -318,13 +320,15 @@ async def run_local_scan(repo_path: str = ".",
                          explanations: bool = True,
                          on_chunk_done=None,
                          file_contents: list[tuple[str, str]] | None = None,
+                         issue_seeds=None,
+                         code_index=None,
                          ) -> ReviewSummary:
     """Scan entire codebase and return AI review.
 
     If file_contents is provided, skips file collection/reading
     (used when caller already read files for estimation).
     """
-    from boomai.gemini_review import scan_with_gemini
+    from boomai.review.gemini_review import scan_with_gemini
 
     if file_contents is None:
         # Collect and read files (standalone usage without estimation)
@@ -380,12 +384,14 @@ async def run_local_scan(repo_path: str = ".",
         explanations=explanations,
         on_progress=_progress,
         on_chunk_done=on_chunk_done,
+        issue_seeds=issue_seeds,
+        code_index=code_index,
     )
 
 
 def cmd_fix(args):
     """Scan entire codebase and auto-apply fixes."""
-    from boomai.estimator import estimate_scan, format_estimate
+    from boomai.review.estimator import estimate_scan, format_estimate
 
     require_api_key()
     repo_path = os.path.abspath(".")
@@ -411,6 +417,7 @@ def cmd_fix(args):
         return
 
     file_contents = read_file_contents(reviewable, repo_path)
+    code_index = build_code_index(file_contents, languages)
 
     # ── Estimate cost & time ──────────────────────────────
     estimate = estimate_scan(
@@ -436,6 +443,12 @@ def cmd_fix(args):
     t0 = time.monotonic()
     comments = settings.scan_comments
     explanations = settings.scan_explanations
+    analysis = run_static_analysis_suite(
+        repo_path=repo_path,
+        reviewable_files=reviewable,
+        detected_languages=languages,
+        on_progress=lambda msg: print(f"  {msg}"),
+    )
 
     applied_total = 0
 
@@ -450,6 +463,8 @@ def cmd_fix(args):
         repo_path, comments=comments, explanations=explanations,
         on_chunk_done=_on_chunk_done,
         file_contents=file_contents,
+        issue_seeds=analysis.prioritized_issue_seeds,
+        code_index=code_index,
     ))
     elapsed = time.monotonic() - t0
     print_review(review, applied=applied_total, elapsed=elapsed)

@@ -8,8 +8,8 @@ from typing import Callable
 
 import httpx
 
-from .config import settings
-from .models import ReviewComment, ReviewSummary, UsageStats
+from ..core.config import settings
+from ..core.models import IssueSeed, ReviewComment, ReviewSummary, UsageStats
 from .prompts import (
     build_scan_system_prompt, build_scan_user_message,
     build_plan_prompt, build_plan_user_message,
@@ -103,7 +103,13 @@ async def _gemini_post(
                     headers={"Content-Type": "application/json"},
                     json=payload,
                 )
-        except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError) as e:
+        except (
+            httpx.ConnectError,
+            httpx.TimeoutException,
+            httpx.ReadError,
+            httpx.ProtocolError,
+            httpx.RemoteProtocolError,
+        ) as e:
             error_type = type(e).__name__
             if attempt < max_retries - 1:
                 wait = 2 ** (attempt + 1)
@@ -126,6 +132,18 @@ def _sanitize_json(text: str) -> str:
     import re
     text = re.sub(r',\s*([}\]])', r'\1', text)
     return text
+
+
+def _compute_effective_timeout(chunk_chars: int, file_count: int) -> float:
+    """Scale chunk timeout with payload size instead of file count alone."""
+    timeout = settings.scan_timeout
+    if file_count == 1:
+        timeout *= 2
+    if chunk_chars >= 100_000:
+        timeout = max(timeout, settings.scan_timeout + 180)
+    elif chunk_chars >= 60_000:
+        timeout = max(timeout, settings.scan_timeout + 90)
+    return timeout
 
 
 def _recover_truncated_json(text: str) -> dict | None:
@@ -344,7 +362,7 @@ async def _plan_chunks(
     def _resolve_dir(raw: str) -> str | None:
         """Resolve a Gemini-returned directory to a dir_files key."""
         norm = raw.replace("\\", "/").rstrip("/") + "/"
-        if norm.startswith("./"):
+        if norm.startswith("./") and norm != "./":
             norm = norm[2:]
         if norm in dir_files:
             return norm
@@ -437,8 +455,25 @@ async def _scan_chunk(
     on_progress: ProgressFn = None,
     model_chain: _ModelChain | None = None,
     usage: UsageStats | None = None,
+    repo_file_map: dict[str, str] | None = None,
+    issue_seeds: list[IssueSeed] | None = None,
+    code_index=None,
 ) -> ReviewSummary:
     """Send a single chunk of files to Gemini for scan review."""
+    related_snippets = []
+    chunk_issue_seeds = []
+    if repo_file_map is not None:
+        from ..context.retriever import retrieve_related_context
+
+        retrieval = retrieve_related_context(
+            primary_files=[path for path, _ in file_contents],
+            repo_file_map=repo_file_map,
+            code_index=code_index,
+            issue_seeds=issue_seeds,
+        )
+        related_snippets = retrieval.snippets
+        chunk_issue_seeds = retrieval.issue_seeds
+
     system_prompt = build_scan_system_prompt(
         detected_languages, comments=comments, explanations=explanations,
     )
@@ -447,7 +482,18 @@ async def _scan_chunk(
         file_contents=file_contents,
         detected_languages=detected_languages,
         chunk_info=chunk_info,
+        issue_seeds=chunk_issue_seeds,
+        related_snippets=related_snippets,
     )
+    chunk_chars = sum(len(content) for _, content in file_contents)
+
+    if settings.scan_debug and on_progress:
+        on_progress(
+            f"  {chunk_info} - prompt chars: "
+            f"system={len(system_prompt):,}, user={len(user_message):,}, "
+            f"chunk={chunk_chars:,}, files={len(file_contents)}, "
+            f"issue_seeds={len(chunk_issue_seeds)}, snippets={len(related_snippets)}"
+        )
 
     url = model_chain.build_url() if model_chain else (
         f"{settings.gemini_base_url}/{settings.llm_model}"
@@ -459,9 +505,7 @@ async def _scan_chunk(
             on_progress(f"  {chunk_info} — attempt {attempt} failed: {msg}")
 
     # Give single-file chunks 2x timeout — they can't be split further
-    effective_timeout = settings.scan_timeout
-    if len(file_contents) == 1:
-        effective_timeout = settings.scan_timeout * 2
+    effective_timeout = _compute_effective_timeout(chunk_chars, len(file_contents))
 
     try:
         response = await _with_heartbeat(
@@ -499,6 +543,9 @@ async def _scan_chunk(
                     comments=comments, explanations=explanations,
                     on_progress=on_progress, model_chain=model_chain,
                     usage=usage,
+                    repo_file_map=repo_file_map,
+                    issue_seeds=issue_seeds,
+                    code_index=code_index,
                 )
         logger.error("Rate limited (429) — no fallback models left")
         return _rate_limited_review()
@@ -535,6 +582,8 @@ async def scan_with_gemini(
     explanations: bool = True,
     on_progress: Callable[[str], None] | None = None,
     on_chunk_done: Callable[[ReviewSummary], None] | None = None,
+    issue_seeds: list[IssueSeed] | None = None,
+    code_index=None,
 ) -> ReviewSummary:
     """Send full file contents + static findings to Gemini for codebase scan.
 
@@ -550,6 +599,7 @@ async def scan_with_gemini(
 
     model_chain = _ModelChain(settings.llm_model)
     usage = UsageStats()
+    repo_file_map = {path: content for path, content in file_contents}
 
     # Always try LLM planning first — hard timeout protects us
     _emit("Planning review chunks...")
@@ -575,6 +625,9 @@ async def scan_with_gemini(
                 comments=comments, explanations=explanations,
                 on_progress=on_progress, model_chain=model_chain,
                 usage=usage,
+                repo_file_map=repo_file_map,
+                issue_seeds=issue_seeds,
+                code_index=code_index,
             )
             # 429 — stop immediately, don't split
             if result.summary == "Rate limited.":
@@ -620,6 +673,9 @@ async def scan_with_gemini(
             comments=comments, explanations=explanations,
             on_progress=on_progress, model_chain=model_chain,
             usage=usage,
+            repo_file_map=repo_file_map,
+            issue_seeds=issue_seeds,
+            code_index=code_index,
         )
         # 429 with all models exhausted — stop everything, don't split
         if result.summary == "Rate limited.":

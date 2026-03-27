@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .models import Finding, Severity, FindingSource
+from ..core.models import Finding, FindingSource, Severity
 from .languages import LANGUAGES
 
 logger = logging.getLogger(__name__)
@@ -101,7 +101,7 @@ def run_semgrep(
         logger.info("No reviewable files, skipping Semgrep")
         return [], "skipped (no files)"
 
-    rules_dir = Path(__file__).parent / "data" / "semgrep"
+    rules_dir = Path(__file__).resolve().parent.parent / "data" / "semgrep"
 
     config_args = []
     include_args = []

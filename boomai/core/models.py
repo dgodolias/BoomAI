@@ -31,6 +31,17 @@ class Finding(BaseModel):
     suggestion: str | None = None
 
 
+class IssueSeed(BaseModel):
+    """Normalized non-AI issue seed used to guide retrieval and review."""
+    file: str
+    line: int
+    end_line: int | None = None
+    severity: Severity
+    source: FindingSource
+    rule_id: str
+    message: str
+
+
 class ReviewComment(BaseModel):
     file: str
     line: int

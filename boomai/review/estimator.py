@@ -82,8 +82,8 @@ def estimate_scan(
     languages: list[str] | None = None,
 ) -> ScanEstimate:
     """Estimate cost and time for a full codebase scan (no API calls)."""
-    from boomai.gemini_review import _chunk_files
-    from boomai.prompts import build_scan_system_prompt, build_plan_prompt
+    from boomai.review.gemini_review import _chunk_files
+    from boomai.review.prompts import build_plan_prompt, build_scan_system_prompt
 
     total_chars = sum(len(c) for _, c in file_contents)
     chunks = _chunk_files(file_contents, max_scan_chars)

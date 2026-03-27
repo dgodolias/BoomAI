@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     scan_max_files: int = 1500
     scan_output_tokens: int = 65536
     scan_timeout: float = 180.0
+    scan_debug: bool = False
     scan_comments: bool = False
     scan_explanations: bool = True
 

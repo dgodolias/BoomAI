@@ -1,6 +1,10 @@
 """Dynamic prompt builder for C#/Unity code review."""
 
-from .languages import LANGUAGES
+from __future__ import annotations
+
+from ..analysis.languages import LANGUAGES
+from ..context.retriever import ContextSnippet
+from ..core.models import IssueSeed
 
 
 def _build_language_extras(lang_configs: list) -> list[str]:
@@ -21,13 +25,13 @@ _SECURITY_PATTERNS = [
     "",
     "## Security Patterns (check each explicitly)",
     "### Input Handling",
-    "- Path traversal: is input decoded BEFORE validation? (`%2e%2e` → `..` bypasses check)",
+    "- Path traversal: is input decoded BEFORE validation? (`%2e%2e` -> `..` bypasses check)",
     "- Is MIME type from client trusted without server-side magic-byte check?",
     "- Are file paths normalized and verified to stay within a base directory?",
     "- Is there a whitelist regex instead of a blacklist for input validation?",
     "",
     "### Authentication & Authorization",
-    "- Does auth return early for unknown user? (timing attack → username enumeration)",
+    "- Does auth return early for unknown user? (timing attack -> username enumeration)",
     "- Are there plaintext password comparisons or legacy plaintext fallbacks?",
     "- Is the same authz check applied consistently across ALL routes for a given resource?",
     "- Do auth hooks/middleware early-return after sending 401, or does the route handler still execute?",
@@ -46,21 +50,20 @@ _SECURITY_PATTERNS = [
     "- Is error response format consistent across all routes? (`{ error }` vs `{ message }` vs `{ errors: [] }`)",
     "",
     "### Unity Game-Specific Patterns",
-    "- ScriptableObject mutated at runtime without Instantiate — shared state corruption across all references",
-    "- Singleton with static MonoBehaviour reference but no duplicate guard on scene reload — double managers, leaked events",
-    "- Static event dictionary (SystemEventManager pattern) with StartListening but no StopListening — delegates on destroyed objects throw MissingReferenceException, prevent GC",
-    "- `Resources.Load` in loop or frequent path without caching result — repeated disk access causes frame stutters",
-    "- Event += subscription in Configure/Init without matching -= in OnDestroy/OnDisable — memory leaks and stale callbacks after scene transitions",
-    "- Coroutine started without storing reference or stopping on OnDisable/OnDestroy — orphaned coroutines access destroyed objects",
+    "- ScriptableObject mutated at runtime without Instantiate -> shared state corruption across all references",
+    "- Singleton with static MonoBehaviour reference but no duplicate guard on scene reload -> double managers, leaked events",
+    "- Static event dictionary (SystemEventManager pattern) with StartListening but no StopListening -> delegates on destroyed objects throw MissingReferenceException, prevent GC",
+    "- `Resources.Load` in loop or frequent path without caching result -> repeated disk access causes frame stutters",
+    "- Event += subscription in Configure/Init without matching -= in OnDestroy/OnDisable -> memory leaks and stale callbacks after scene transitions",
+    "- Coroutine started without storing reference or stopping on OnDisable/OnDestroy -> orphaned coroutines access destroyed objects",
 ]
 
 
-# ============================================================
-#  Full-codebase scan prompts
-# ============================================================
-
-def build_scan_system_prompt(detected_languages: list[str], comments: bool = False,
-                             explanations: bool = True) -> str:
+def build_scan_system_prompt(
+    detected_languages: list[str],
+    comments: bool = False,
+    explanations: bool = True,
+) -> str:
     """Build system prompt for full-codebase scan mode."""
     lang_configs = [LANGUAGES[k] for k in detected_languages if k in LANGUAGES]
     lang_names = (
@@ -71,7 +74,7 @@ def build_scan_system_prompt(detected_languages: list[str], comments: bool = Fal
 
     parts = [
         f"You are BoomAI, an expert code reviewer with deep expertise in {lang_names}.",
-        "You are performing a FULL CODEBASE SCAN — reviewing entire source files, not a diff.",
+        "You are performing a FULL CODEBASE SCAN - reviewing entire source files, not a diff.",
         "",
         "## Your Role",
         "- Identify bugs, security vulnerabilities, and correctness issues",
@@ -79,6 +82,7 @@ def build_scan_system_prompt(detected_languages: list[str], comments: bool = Fal
         "- Spot performance anti-patterns and resource leaks",
         "- Check for missing error handling and edge cases",
         "- Validate static analysis findings (confirm real issues, flag false positives)",
+        "- Use related cross-file context when it clarifies ownership, definitions, or call flow",
         "- Provide actionable suggestions with corrected code",
         "",
         "## Focus Areas",
@@ -126,31 +130,35 @@ def build_scan_system_prompt(detected_languages: list[str], comments: bool = Fal
         "- severity must be one of: critical, high, medium, low, info",
         "- line numbers are for reference only (to help locate the issue)",
         "",
-        "## Suggestion Rules (CRITICAL — read carefully)",
+        "## Suggestion Rules (CRITICAL - read carefully)",
         "- old_code: copy-paste the EXACT code that needs to be replaced (as it appears in the file, with original indentation)",
         "- suggestion: the EXACT replacement code that should replace old_code",
         "- Both old_code and suggestion must be valid, syntactically correct code",
         "- NEVER put natural language instructions in old_code or suggestion",
-        "- Keep fixes SMALL and SURGICAL — fix ONE thing at a time (max ~30 lines)",
+        "- Keep fixes SMALL and SURGICAL - fix ONE thing at a time (max ~30 lines)",
         '- To DELETE dead/duplicate code, provide old_code and set suggestion to an empty string ("")',
         "- If a fix requires very large restructuring (more than ~30 lines), describe it in `message` and OMIT old_code/suggestion",
         "- If you cannot provide an exact fix, omit both old_code and suggestion",
     ])
 
     if comments:
-        parts.append("- Add a SHORT inline comment (e.g., `// BoomAI: fixed resource leak`) "
-                     "on the FIRST changed line of each suggestion to explain the fix")
+        parts.append(
+            "- Add a SHORT inline comment (e.g., `// BoomAI: fixed resource leak`) "
+            "on the FIRST changed line of each suggestion to explain the fix"
+        )
     else:
         parts.append("- Do NOT add any comments or annotations to the suggestion code")
 
     if not explanations:
-        parts.append("- Keep the message field BRIEF (max 10 words, e.g. 'Thread.Sleep → Task.Delay') "
-                     "— do NOT explain why, just name the issue")
+        parts.append(
+            "- Keep the message field BRIEF (max 10 words, e.g. 'Thread.Sleep -> Task.Delay') "
+            "- do NOT explain why, just name the issue"
+        )
 
     parts.extend([
         "",
         "- Keep findings focused and actionable (max 30 per chunk)",
-        "- Review EVERY file systematically — do not skip any. Distribute attention evenly across all files.",
+        "- Review EVERY file systematically - do not skip any. Distribute attention evenly across all files.",
         "- Prioritize high-severity issues over style nits",
         "- If the code looks good, say so in the summary with minimal/no findings",
         "- ALWAYS respond with valid JSON, nothing else",
@@ -158,10 +166,6 @@ def build_scan_system_prompt(detected_languages: list[str], comments: bool = Fal
 
     return "\n".join(parts)
 
-
-# ============================================================
-#  Scan planning prompt (repo-map phase)
-# ============================================================
 
 def build_plan_prompt(char_budget: int) -> str:
     """Build system prompt for the scan planning phase."""
@@ -174,7 +178,7 @@ Your job: group **directories** into review chunks for an AI code reviewer.
 - Each chunk MUST stay under {char_budget:,} characters total
 - Group related directories together (same subsystem, feature area, or module)
 - Put directories with the largest/most complex code in smaller chunks so they get full reviewer attention
-- Every directory in the map MUST appear in exactly one chunk — do not skip any
+- Every directory in the map MUST appear in exactly one chunk - do not skip any
 - Order chunks so the most important/complex ones come first
 - If a single directory exceeds the budget, put it alone in its own chunk
 
@@ -205,6 +209,8 @@ def build_scan_user_message(
     file_contents: list[tuple[str, str]],
     detected_languages: list[str],
     chunk_info: str = "",
+    issue_seeds: list[IssueSeed] | None = None,
+    related_snippets: list[ContextSnippet] | None = None,
 ) -> str:
     """Build user message for full-codebase scan with file contents."""
     lang_configs = [LANGUAGES[k] for k in detected_languages if k in LANGUAGES]
@@ -221,19 +227,48 @@ def build_scan_user_message(
         files_block.append("")
     files_text = "\n".join(files_block)
 
+    issue_seeds = issue_seeds or []
+    related_snippets = related_snippets or []
     extra_bullets = "\n".join(_build_language_extras(lang_configs))
 
     header = "## Full Codebase Scan"
     if chunk_info:
         header += f" ({chunk_info})"
 
+    static_findings_text = ""
+    if issue_seeds:
+        lines = ["## Static Analysis Findings"]
+        for seed in issue_seeds:
+            lines.append(
+                f"- {seed.file}:{seed.line} [{seed.source.value}/{seed.severity.value}] "
+                f"{seed.rule_id}: {seed.message}"
+            )
+        static_findings_text = "\n".join(lines)
+
+    related_context_text = ""
+    if related_snippets:
+        lines = ["## Related Cross-File Context"]
+        for snippet in related_snippets:
+            lines.append(f"### Context: {snippet.file}")
+            lines.append(f"Reason: {snippet.reason}")
+            lines.append("```")
+            lines.append(snippet.content)
+            lines.append("```")
+            lines.append("")
+        related_context_text = "\n".join(lines).rstrip()
+
     return f"""{header}
 
 {files_text}
 
+{static_findings_text}
+
+{related_context_text}
+
 ## Instructions
 1. Review ALL the source files above (languages detected: {lang_names})
-2. Find issues, especially:
+2. Use any static findings and related cross-file context to validate real issues and avoid false positives
+3. Find issues, especially:
 {extra_bullets}
-3. Focus on bugs, security issues, and correctness — not just style
-4. Provide your review as JSON per the system prompt format"""
+4. Focus on bugs, security issues, and correctness - not just style
+5. Provide your review as JSON per the system prompt format"""
