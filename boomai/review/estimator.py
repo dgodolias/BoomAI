@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from .estimation_history import EstimateFeatures, learn_adjustment
+
 CHARS_PER_TOKEN = 3.7
 SCAN_OUTPUT_RATIO_LOW = 0.01
 SCAN_OUTPUT_RATIO_HIGH = 0.12
@@ -68,6 +70,8 @@ class ScanEstimate:
     cost_max: float
     time_min: float
     time_max: float
+    features: EstimateFeatures
+    learned_samples: int = 0
 
 
 def estimate_scan(
@@ -146,6 +150,28 @@ def estimate_scan(
     patch_batches_high = math.ceil(patch_calls_high / patch_concurrency)
     time_min = _PLAN_TIME_S + scan_batches * scan_per_call * 0.35 + patch_batches_low * patch_per_call
     time_max = _PLAN_TIME_S + scan_batches * scan_per_call + patch_batches_high * patch_per_call
+    base_cost_mid = (cost_min + cost_max) / 2.0
+    base_time_mid = (time_min + time_max) / 2.0
+    features = EstimateFeatures(
+        total_chars=total_chars,
+        file_count=len(file_contents),
+        chunk_count=chunk_count,
+        api_calls_mid=(1 + chunk_count + ((patch_calls_low + patch_calls_high) / 2.0)),
+        input_tokens_mid=(total_input_low + total_input_high) / 2.0,
+        output_tokens_mid=(total_output_low + total_output_high) / 2.0,
+        base_cost_mid=base_cost_mid,
+        base_time_mid=base_time_mid,
+        scan_model_flash=int("flash" in model.lower()),
+        patch_model_flash=int("flash" in patch_model.lower()),
+    )
+    learned = learn_adjustment(features)
+    learned_samples = 0
+    if learned is not None:
+        cost_min = learned.cost_min
+        cost_max = learned.cost_max
+        time_min = learned.time_min
+        time_max = learned.time_max
+        learned_samples = learned.samples
 
     return ScanEstimate(
         model=model,
@@ -166,6 +192,8 @@ def estimate_scan(
         cost_max=cost_max,
         time_min=time_min,
         time_max=time_max,
+        features=features,
+        learned_samples=learned_samples,
     )
 
 
@@ -204,6 +232,8 @@ def format_estimate(est: ScanEstimate) -> None:
     print(f"    Est. output: ~{_fmt_tokens(est.output_tokens_low)} -- {_fmt_tokens(est.output_tokens_high)} tokens")
     print(f"    Est. cost:   {_fmt_cost(est.cost_min)} -- {_fmt_cost(est.cost_max)}")
     print(f"    Est. time:   ~{_fmt_time(est.time_min)} -- {_fmt_time(est.time_max)}")
+    if est.learned_samples:
+        print(f"    Learned:     calibrated from {est.learned_samples} past run(s)")
     if not est.is_known_model:
         print("    Warning:     Unknown model -- using conservative estimate")
     print(f"  {sep}\n")

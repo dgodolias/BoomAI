@@ -393,7 +393,8 @@ async def run_local_scan(repo_path: str = ".",
 
 def cmd_fix(args):
     """Scan entire codebase and auto-apply fixes."""
-    from boomai.review.estimator import estimate_scan, format_estimate
+    from boomai.review.estimator import estimate_scan, format_estimate, get_pricing
+    from boomai.review.estimation_history import record_run
 
     require_api_key()
     repo_path = os.path.abspath(".")
@@ -474,6 +475,15 @@ def cmd_fix(args):
         code_index=code_index,
     ))
     elapsed = time.monotonic() - t0
+    if review.usage and review.usage.api_calls > 0:
+        record_run(
+            features=estimate.features,
+            elapsed_seconds=elapsed,
+            usage=review.usage,
+            findings_count=len(review.findings),
+            applied_count=applied_total,
+            get_pricing=get_pricing,
+        )
     print_review(review, applied=applied_total, elapsed=elapsed)
 
     if applied_total:
