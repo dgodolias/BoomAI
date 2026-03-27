@@ -951,6 +951,56 @@ def _chunk_files(
     return chunks if chunks else [[]]
 
 
+def _build_numbered_section_content(lines: list[str], start: int, end: int) -> str:
+    """Build a numbered line window so line references stay meaningful."""
+    numbered = [
+        f"{line_no:5d}: {line}"
+        for line_no, line in enumerate(lines[start:end], start=start + 1)
+    ]
+    return "\n".join(numbered)
+
+
+def _split_single_file_into_sections(
+    path: str,
+    content: str,
+    *,
+    target_chars: int = 28_000,
+    overlap_lines: int = 30,
+) -> list[tuple[str, list[tuple[str, str]]]]:
+    """Split one large file into overlapping numbered sections."""
+    lines = content.replace("\r\n", "\n").split("\n")
+    if not lines:
+        return [(f"{path}:1-1", [(path, content)])]
+
+    sections: list[tuple[str, list[tuple[str, str]]]] = []
+    start = 0
+    total = len(lines)
+
+    while start < total:
+        end = start
+        chars = 0
+        while end < total:
+            candidate = lines[end]
+            line_cost = len(candidate) + 12
+            if end > start and chars + line_cost > target_chars:
+                break
+            chars += line_cost
+            end += 1
+
+        if end <= start:
+            end = min(total, start + 1)
+
+        label = f"{path}:{start + 1}-{end}"
+        section_text = _build_numbered_section_content(lines, start, end)
+        sections.append((label, [(path, section_text)]))
+
+        if end >= total:
+            break
+        start = max(start + 1, end - overlap_lines)
+
+    return sections
+
+
 async def _scan_chunk(
     file_contents: list[tuple[str, str]],
     detected_languages: list[str],
@@ -964,6 +1014,11 @@ async def _scan_chunk(
     issue_seeds: list[IssueSeed] | None = None,
     code_index=None,
     parse_retries_remaining: int = 1,
+    max_snippets_override: int | None = None,
+    max_snippet_chars_override: int | None = None,
+    issue_seed_limit: int | None = None,
+    output_tokens_override: int | None = None,
+    degraded_mode: bool = False,
 ) -> ReviewSummary:
     """Send a single chunk of files to Gemini for scan review."""
     related_snippets = []
@@ -980,16 +1035,28 @@ async def _scan_chunk(
             max_snippets = 5
             max_snippet_chars = 6000
 
-        retrieval = retrieve_related_context(
-            primary_files=[path for path, _ in file_contents],
-            repo_file_map=repo_file_map,
-            code_index=code_index,
-            issue_seeds=issue_seeds,
-            max_snippets=max_snippets,
-            max_snippet_chars=max_snippet_chars,
-        )
-        related_snippets = retrieval.snippets
-        chunk_issue_seeds = retrieval.issue_seeds
+        if len(file_contents) == 1 and sum(len(content) for _, content in file_contents) >= 45_000:
+            max_snippets = min(max_snippets, 2)
+            max_snippet_chars = min(max_snippet_chars, 2500)
+
+        if max_snippets_override is not None:
+            max_snippets = max_snippets_override
+        if max_snippet_chars_override is not None:
+            max_snippet_chars = max_snippet_chars_override
+
+        if max_snippets > 0 or issue_seed_limit != 0:
+            retrieval = retrieve_related_context(
+                primary_files=[path for path, _ in file_contents],
+                repo_file_map=repo_file_map,
+                code_index=code_index,
+                issue_seeds=issue_seeds,
+                max_snippets=max_snippets,
+                max_snippet_chars=max_snippet_chars,
+            )
+            related_snippets = retrieval.snippets[:max_snippets] if max_snippets >= 0 else retrieval.snippets
+            chunk_issue_seeds = retrieval.issue_seeds
+            if issue_seed_limit is not None:
+                chunk_issue_seeds = chunk_issue_seeds[:issue_seed_limit]
 
     system_prompt = build_scan_system_prompt(
         detected_languages, comments=comments, explanations=explanations,
@@ -1008,6 +1075,8 @@ async def _scan_chunk(
         len(file_contents),
         len(chunk_issue_seeds),
     )
+    if output_tokens_override is not None:
+        output_tokens = min(output_tokens, output_tokens_override)
 
     if settings.scan_debug and on_progress:
         on_progress(
@@ -1103,6 +1172,94 @@ async def _scan_chunk(
             or chunk_chars > 45_000
             or len(user_message) > 60_000
         )
+        if len(file_contents) == 1 and should_split_large_chunk:
+            path, content = file_contents[0]
+            reason = "partial JSON recovered" if parse_status == "recovered" else "malformed JSON response"
+
+            if not degraded_mode:
+                if on_progress:
+                    on_progress(f"  {chunk_info} - {reason}, retrying single file with reduced context")
+                return await _scan_chunk(
+                    file_contents,
+                    detected_languages,
+                    chunk_info,
+                    comments=comments,
+                    explanations=explanations,
+                    on_progress=on_progress,
+                    model_chain=model_chain,
+                    usage=usage,
+                    repo_file_map=repo_file_map,
+                    issue_seeds=issue_seeds,
+                    code_index=code_index,
+                    parse_retries_remaining=parse_retries_remaining - 1,
+                    max_snippets_override=2,
+                    max_snippet_chars_override=2200,
+                    issue_seed_limit=2,
+                    output_tokens_override=4096,
+                    degraded_mode=True,
+                )
+
+            if parse_status == "recovered" and parsed.findings:
+                if on_progress:
+                    on_progress(f"  {chunk_info} - using {len(parsed.findings)} recovered finding(s) from partial JSON")
+                return _filter_findings(parsed)
+
+            sections = _split_single_file_into_sections(path, content)
+            if len(sections) > 1:
+                if on_progress:
+                    on_progress(
+                        f"  {chunk_info} - {reason}, splitting single file into {len(sections)} line-window sections"
+                    )
+                section_results: list[ReviewSummary] = []
+                for index, (section_label, section_files) in enumerate(sections, 1):
+                    section_result = await _scan_chunk(
+                        section_files,
+                        detected_languages,
+                        f"{chunk_info}/s{index}",
+                        comments=comments,
+                        explanations=explanations,
+                        on_progress=on_progress,
+                        model_chain=_ModelChain(model_chain.current if model_chain else settings.llm_model),
+                        usage=usage,
+                        repo_file_map=repo_file_map,
+                        issue_seeds=issue_seeds,
+                        code_index=code_index,
+                        parse_retries_remaining=0,
+                        max_snippets_override=1,
+                        max_snippet_chars_override=1600,
+                        issue_seed_limit=1,
+                        output_tokens_override=4096,
+                        degraded_mode=True,
+                    )
+                    section_results.append(section_result)
+
+                deduped: list[ReviewComment] = []
+                seen_keys: set[tuple[str, int, str]] = set()
+                for result in section_results:
+                    for finding in result.findings:
+                        key = (finding.file, finding.line, finding.body)
+                        if key in seen_keys:
+                            continue
+                        seen_keys.add(key)
+                        deduped.append(finding)
+
+                total_critical = sum(result.critical_count for result in section_results)
+                merged_summary = _combine_review_summaries(
+                    [result.summary for result in section_results],
+                    fallback="AI review unavailable.",
+                    force_recovered_text=bool(deduped),
+                )
+                return ReviewSummary(
+                    summary=merged_summary,
+                    findings=deduped,
+                    critical_count=total_critical,
+                    has_critical=total_critical > 0,
+                )
+
+            if on_progress:
+                on_progress(f"  {chunk_info} - {reason}, single-file recovery exhausted")
+            return _fallback_review()
+
         if should_split_large_chunk:
             if on_progress:
                 reason = "partial JSON recovered" if parse_status == "recovered" else "malformed JSON response"

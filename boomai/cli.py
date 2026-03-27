@@ -527,6 +527,26 @@ def read_file_contents(
     return contents
 
 
+def _report_unreadable_files(
+    requested_files: list[str],
+    file_contents: list[tuple[str, str]],
+    *,
+    debug: bool = False,
+) -> None:
+    """Report files that were considered reviewable but could not be read."""
+    loaded = {path for path, _ in file_contents}
+    missing = [path for path in requested_files if path not in loaded]
+    if not missing:
+        return
+
+    print(f"    Skipped {len(missing)} unreadable/binary file(s).")
+    if debug:
+        for path in missing[:10]:
+            print(f"      - {path}")
+        if len(missing) > 10:
+            print(f"      ... and {len(missing) - 10} more")
+
+
 async def run_local_scan(repo_path: str = ".",
                          exclude: list[str] | None = None,
                          include: list[str] | None = None,
@@ -580,6 +600,7 @@ async def run_local_scan(repo_path: str = ".",
             )
 
         file_contents = read_file_contents(reviewable, repo_path)
+        _report_unreadable_files(reviewable, file_contents, debug=settings.scan_debug)
         languages = detect_languages([p for p, _ in file_contents])
     else:
         languages = detect_languages([p for p, _ in file_contents])
@@ -633,6 +654,7 @@ def cmd_fix(args):
 
     print("    Reading file contents...")
     file_contents = read_file_contents(reviewable, repo_path)
+    _report_unreadable_files(reviewable, file_contents, debug=settings.scan_debug)
 
     # ── Estimate cost & time ──────────────────────────────
     estimate = estimate_scan(
