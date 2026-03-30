@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..analysis.languages import LANGUAGES
 from ..context.retriever import ContextSnippet
 from ..core.models import IssueSeed
+from .prompt_composer import append_fix_pack_guidance, append_scan_pack_guidance
 
 
 def _build_language_extras(lang_configs: list) -> list[str]:
@@ -141,6 +142,7 @@ def build_scan_system_prompt(
     detected_languages: list[str],
     comments: bool = False,
     explanations: bool = True,
+    selected_pack_ids: list[str] | None = None,
 ) -> str:
     """Build system prompt for full-codebase scan mode."""
     lang_configs = [LANGUAGES[k] for k in detected_languages if k in LANGUAGES]
@@ -227,10 +229,13 @@ def build_scan_system_prompt(
         "- ALWAYS respond with valid JSON, nothing else",
     ])
 
-    return "\n".join(parts)
+    return append_scan_pack_guidance("\n".join(parts), selected_pack_ids)
 
 
-def build_fix_system_prompt(comments: bool = False) -> str:
+def build_fix_system_prompt(
+    comments: bool = False,
+    selected_pack_ids: list[str] | None = None,
+) -> str:
     """Build system prompt for single-finding patch generation."""
     parts = [
         "You are BoomAI's patch generation module.",
@@ -262,7 +267,7 @@ def build_fix_system_prompt(comments: bool = False) -> str:
         parts.append("- Add one short BoomAI comment on the first changed line")
     else:
         parts.append("- Do NOT add comments or annotations")
-    return "\n".join(parts)
+    return append_fix_pack_guidance("\n".join(parts), selected_pack_ids)
 
 
 def build_fix_user_message(

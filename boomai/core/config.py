@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     scan_pro_max_concurrency: int = 2
     scan_flash_max_concurrency: int = 4
     patch_max_findings_per_chunk: int = 5
+    prompt_pack_scan_max_extras: int = 3
+    prompt_pack_fix_max_extras: int = 2
 
     # Scan planning (repo-map phase)
     plan_output_tokens: int = 65536

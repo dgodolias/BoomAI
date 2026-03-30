@@ -11,6 +11,7 @@ import httpx
 
 from ..core.config import settings
 from ..core.models import IssueSeed, ReviewComment, ReviewSummary, Severity, UsageStats
+from .pack_selector import select_prompt_pack_ids
 from .prompts import (
     build_scan_system_prompt, build_scan_user_message,
     build_plan_prompt, build_plan_response_schema, build_plan_user_message,
@@ -578,7 +579,17 @@ async def _generate_fix_for_finding(
         )
         related_snippets = retrieval.snippets[:2]
 
-    system_prompt = build_fix_system_prompt(comments=comments)
+    selected_pack_ids = select_prompt_pack_ids(
+        [(finding.file, target_context)],
+        issue_seeds=[finding],
+        stage="fix",
+        max_extra_packs=settings.prompt_pack_fix_max_extras,
+    )
+
+    system_prompt = build_fix_system_prompt(
+        comments=comments,
+        selected_pack_ids=selected_pack_ids,
+    )
     user_message = build_fix_user_message(
         finding=matching_seed,
         review_finding=finding,
@@ -597,7 +608,8 @@ async def _generate_fix_for_finding(
     if settings.scan_debug and on_progress:
         on_progress(
             f"  {label} patch - prompt chars: system={len(system_prompt):,}, "
-            f"user={len(user_message):,}, model={model_chain.current if model_chain else settings.patch_llm_model}"
+            f"user={len(user_message):,}, packs={','.join(selected_pack_ids)}, "
+            f"model={model_chain.current if model_chain else settings.patch_llm_model}"
         )
 
     try:
@@ -1058,8 +1070,18 @@ async def _scan_chunk(
             if issue_seed_limit is not None:
                 chunk_issue_seeds = chunk_issue_seeds[:issue_seed_limit]
 
+    selected_pack_ids = select_prompt_pack_ids(
+        file_contents,
+        issue_seeds=chunk_issue_seeds,
+        stage="scan",
+        max_extra_packs=settings.prompt_pack_scan_max_extras,
+    )
+
     system_prompt = build_scan_system_prompt(
-        detected_languages, comments=comments, explanations=explanations,
+        detected_languages,
+        comments=comments,
+        explanations=explanations,
+        selected_pack_ids=selected_pack_ids,
     )
 
     user_message = build_scan_user_message(
@@ -1084,7 +1106,8 @@ async def _scan_chunk(
             f"system={len(system_prompt):,}, user={len(user_message):,}, "
             f"chunk={chunk_chars:,}, files={len(file_contents)}, "
             f"issue_seeds={len(chunk_issue_seeds)}, snippets={len(related_snippets)}, "
-            f"max_output_tokens={output_tokens:,}, model={model_chain.current if model_chain else settings.llm_model}"
+            f"packs={','.join(selected_pack_ids)}, max_output_tokens={output_tokens:,}, "
+            f"model={model_chain.current if model_chain else settings.llm_model}"
         )
 
     url = model_chain.build_url() if model_chain else (
