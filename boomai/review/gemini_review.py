@@ -417,6 +417,9 @@ def _is_high_value_finding(finding: ReviewComment) -> bool:
     if any(pattern in lowered for pattern in low_value_patterns):
         return False
 
+    if settings.scan_profile == "deep":
+        return finding.severity not in {Severity.LOW, Severity.INFO}
+
     medium_keep_patterns = (
         "memory leak",
         "unsubscribe",

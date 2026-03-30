@@ -10,8 +10,8 @@ from pathlib import Path
 from ..core.models import UsageStats
 
 HISTORY_VERSION = 1
-MIN_SAMPLES = 4
-RIDGE_LAMBDA = 0.05
+MIN_SAMPLES = 8
+Z_95 = 1.96
 
 
 @dataclass
@@ -26,6 +26,7 @@ class EstimateFeatures:
     base_time_mid: float
     scan_model_flash: int
     patch_model_flash: int
+    scan_profile_deep: int = 0
 
 
 @dataclass
@@ -76,6 +77,7 @@ def _feature_vector(features: EstimateFeatures) -> list[float]:
         features.base_time_mid / 60.0,
         float(features.scan_model_flash),
         float(features.patch_model_flash),
+        float(features.scan_profile_deep),
     ]
 
 
@@ -104,7 +106,35 @@ def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list
     return [augmented[i][n] for i in range(n)]
 
 
-def _fit_ridge(xs: list[list[float]], ys: list[float]) -> list[float] | None:
+def _matrix_inverse(matrix: list[list[float]]) -> list[list[float]] | None:
+    n = len(matrix)
+    augmented = [
+        matrix[i][:] + [1.0 if i == j else 0.0 for j in range(n)]
+        for i in range(n)
+    ]
+
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(augmented[r][col]))
+        if abs(augmented[pivot][col]) < 1e-9:
+            return None
+        if pivot != col:
+            augmented[col], augmented[pivot] = augmented[pivot], augmented[col]
+        pivot_value = augmented[col][col]
+        for j in range(2 * n):
+            augmented[col][j] /= pivot_value
+        for row in range(n):
+            if row == col:
+                continue
+            factor = augmented[row][col]
+            if factor == 0:
+                continue
+            for j in range(2 * n):
+                augmented[row][j] -= factor * augmented[col][j]
+
+    return [row[n:] for row in augmented]
+
+
+def _fit_ols(xs: list[list[float]], ys: list[float]) -> tuple[list[float], list[list[float]]] | None:
     if not xs or not ys or len(xs) != len(ys):
         return None
     dim = len(xs[0])
@@ -115,18 +145,48 @@ def _fit_ridge(xs: list[list[float]], ys: list[float]) -> list[float] | None:
             xty[i] += x[i] * y
             for j in range(dim):
                 xtx[i][j] += x[i] * x[j]
-    for i in range(dim):
-        xtx[i][i] += RIDGE_LAMBDA
-    return _solve_linear_system(xtx, xty)
+    inv = _matrix_inverse(xtx)
+    if inv is None:
+        return None
+    coeffs = [sum(inv[i][j] * xty[j] for j in range(dim)) for i in range(dim)]
+    return coeffs, inv
 
 
 def _predict(coeffs: list[float], x: list[float]) -> float:
     return sum(a * b for a, b in zip(coeffs, x))
 
 
-def _relative_error(actual: float, predicted: float) -> float:
-    denom = max(abs(actual), 1e-6)
-    return abs(actual - predicted) / denom
+def _dot(a: list[float], b: list[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _matvec(matrix: list[list[float]], vector: list[float]) -> list[float]:
+    return [sum(row[j] * vector[j] for j in range(len(vector))) for row in matrix]
+
+
+def _prediction_interval(
+    xs: list[list[float]],
+    ys: list[float],
+    coeffs: list[float],
+    inv_xtx: list[list[float]],
+    current_x: list[float],
+    floor: float,
+) -> tuple[float, float]:
+    n = len(xs)
+    p = len(current_x)
+    predicted = max(floor, _predict(coeffs, current_x))
+    if n <= p:
+        margin = max(predicted * 0.25, floor)
+        return max(floor, predicted - margin), predicted + margin
+
+    residuals = [actual - _predict(coeffs, x) for x, actual in zip(xs, ys)]
+    sse = sum(r * r for r in residuals)
+    dof = max(1, n - p)
+    sigma2 = max(1e-9, sse / dof)
+    leverage = max(0.0, _dot(current_x, _matvec(inv_xtx, current_x)))
+    std_pred = math.sqrt(sigma2 * (1.0 + leverage))
+    margin = Z_95 * std_pred
+    return max(floor, predicted - margin), predicted + margin
 
 
 def _calc_actual_cost(usage: UsageStats, get_pricing) -> float:
@@ -172,35 +232,24 @@ def learn_adjustment(features: EstimateFeatures) -> LearnedEstimate | None:
     if len(xs) < MIN_SAMPLES:
         return None
 
-    coeffs_cost = _fit_ridge(xs, ys_cost)
-    coeffs_time = _fit_ridge(xs, ys_time)
-    if coeffs_cost is None or coeffs_time is None:
+    cost_fit = _fit_ols(xs, ys_cost)
+    time_fit = _fit_ols(xs, ys_time)
+    if cost_fit is None or time_fit is None:
         return None
 
+    coeffs_cost, cost_inv = cost_fit
+    coeffs_time, time_inv = time_fit
     current_x = _feature_vector(features)
-    baseline_cost = features.base_cost_mid
-    baseline_time = features.base_time_mid
-    raw_cost = max(0.01, _predict(coeffs_cost, current_x))
-    raw_time = max(5.0, _predict(coeffs_time, current_x))
-
-    blend = min(0.85, max(0.0, (len(xs) - MIN_SAMPLES + 1) / 12.0))
-    predicted_cost = baseline_cost * (1.0 - blend) + raw_cost * blend
-    predicted_time = baseline_time * (1.0 - blend) + raw_time * blend
-
-    fitted_costs = [_predict(coeffs_cost, x) for x in xs]
-    fitted_times = [_predict(coeffs_time, x) for x in xs]
-    cost_error = sum(_relative_error(a, p) for a, p in zip(ys_cost, fitted_costs)) / len(xs)
-    time_error = sum(_relative_error(a, p) for a, p in zip(ys_time, fitted_times)) / len(xs)
-    cost_margin = min(0.9, max(0.18, cost_error * 1.35))
-    time_margin = min(1.2, max(0.22, time_error * 1.35))
+    cost_min, cost_max = _prediction_interval(xs, ys_cost, coeffs_cost, cost_inv, current_x, 0.01)
+    time_min, time_max = _prediction_interval(xs, ys_time, coeffs_time, time_inv, current_x, 5.0)
 
     return LearnedEstimate(
-        cost_min=max(0.01, predicted_cost * (1.0 - cost_margin)),
-        cost_max=predicted_cost * (1.0 + cost_margin),
-        time_min=max(5.0, predicted_time * (1.0 - time_margin)),
-        time_max=predicted_time * (1.0 + time_margin),
+        cost_min=cost_min,
+        cost_max=cost_max,
+        time_min=time_min,
+        time_max=time_max,
         samples=len(xs),
-        blended=blend > 0,
+        blended=False,
     )
 
 

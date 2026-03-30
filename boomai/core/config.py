@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     llm_timeout: float = 300.0
 
     # Scan settings (full-codebase mode)
+    scan_profile: str = "default"
     max_scan_chars: int = 200_000
     scan_max_files: int = 1500
     scan_output_tokens: int = 65536
@@ -34,6 +35,11 @@ class Settings(BaseSettings):
     patch_max_findings_per_chunk: int = 5
     prompt_pack_scan_max_extras: int = 3
     prompt_pack_fix_max_extras: int = 2
+    deep_max_scan_chars: int = 110_000
+    deep_scan_max_files_per_chunk: int = 10
+    deep_patch_max_findings_per_chunk: int = 8
+    deep_prompt_pack_scan_max_extras: int = 4
+    deep_prompt_pack_fix_max_extras: int = 3
 
     # Scan planning (repo-map phase)
     plan_output_tokens: int = 65536

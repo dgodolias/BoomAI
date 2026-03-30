@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -547,6 +548,28 @@ def _report_unreadable_files(
             print(f"      ... and {len(missing) - 10} more")
 
 
+def _apply_scan_profile(profile: str) -> None:
+    """Apply a runtime scan profile without changing persisted settings."""
+    base = {
+        "max_scan_chars": settings.max_scan_chars,
+        "scan_max_files_per_chunk": settings.scan_max_files_per_chunk,
+        "patch_max_findings_per_chunk": settings.patch_max_findings_per_chunk,
+        "prompt_pack_scan_max_extras": settings.prompt_pack_scan_max_extras,
+        "prompt_pack_fix_max_extras": settings.prompt_pack_fix_max_extras,
+    }
+    deep = {
+        "max_scan_chars": settings.deep_max_scan_chars,
+        "scan_max_files_per_chunk": settings.deep_scan_max_files_per_chunk,
+        "patch_max_findings_per_chunk": settings.deep_patch_max_findings_per_chunk,
+        "prompt_pack_scan_max_extras": settings.deep_prompt_pack_scan_max_extras,
+        "prompt_pack_fix_max_extras": settings.deep_prompt_pack_fix_max_extras,
+    }
+    selected = deep if profile == "deep" else base
+    for key, value in selected.items():
+        setattr(settings, key, value)
+    settings.scan_profile = profile
+
+
 async def run_local_scan(repo_path: str = ".",
                          exclude: list[str] | None = None,
                          include: list[str] | None = None,
@@ -630,6 +653,8 @@ def cmd_fix(args):
     from boomai.review.estimation_history import record_run
 
     require_api_key()
+    profile = "deep" if getattr(args, "deep", False) else getattr(args, "profile", settings.scan_profile)
+    _apply_scan_profile(profile)
     repo_path = os.path.abspath(".")
 
     # ── Collect files ─────────────────────────────────────
@@ -642,6 +667,7 @@ def cmd_fix(args):
 
     lang_str = ", ".join(languages) if languages else "none detected"
     print(f"    {len(all_files):,} total, {len(reviewable)} reviewable ({lang_str})")
+    print(f"    Profile: {settings.scan_profile}")
 
     if not reviewable:
         print("  No reviewable source files found.")
@@ -664,6 +690,8 @@ def cmd_fix(args):
         max_scan_chars=settings.max_scan_chars,
         scan_output_tokens=settings.scan_output_tokens,
         plan_output_tokens=settings.plan_output_tokens,
+        profile=settings.scan_profile,
+        patch_max_findings_per_chunk=settings.patch_max_findings_per_chunk,
         languages=languages,
     )
     format_estimate(estimate)
@@ -703,13 +731,19 @@ def cmd_fix(args):
             count = apply_local(chunk_review.findings, repo_path)
             applied_total += count
 
-    review = asyncio.run(run_local_scan(
-        repo_path, comments=comments, explanations=explanations,
-        on_chunk_done=_on_chunk_done,
-        file_contents=file_contents,
-        issue_seeds=analysis.prioritized_issue_seeds,
-        code_index=code_index,
-    ))
+    try:
+        review = asyncio.run(run_local_scan(
+            repo_path, comments=comments, explanations=explanations,
+            on_chunk_done=_on_chunk_done,
+            file_contents=file_contents,
+            issue_seeds=analysis.prioritized_issue_seeds,
+            code_index=code_index,
+        ))
+    except BaseException as exc:
+        print(f"\n  Fatal scan error: {type(exc).__name__}: {exc}")
+        if settings.scan_debug:
+            traceback.print_exc()
+        return
     elapsed = time.monotonic() - t0
     if review.usage and review.usage.api_calls > 0:
         record_run(
@@ -822,6 +856,7 @@ def main():
         epilog="""
 Examples (run from inside your project):
   boom-ai fix                     # scan + auto-fix codebase
+  boom-ai fix --deep              # deeper, slower scan for higher coverage
   boom-ai settings                # configure API key & preferences
 """,
     )
@@ -832,6 +867,17 @@ Examples (run from inside your project):
     fix_parser.add_argument(
         "--shallow", action="store_true",
         help="Only scan files in CWD, skip subdirectories",
+    )
+    fix_parser.add_argument(
+        "--profile",
+        choices=("default", "deep"),
+        default=settings.scan_profile,
+        help="Scan profile: default is faster/cheaper, deep spends more to increase coverage.",
+    )
+    fix_parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="Shortcut for --profile deep.",
     )
 
     # --- settings ---

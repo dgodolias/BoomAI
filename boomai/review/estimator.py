@@ -52,6 +52,7 @@ def get_pricing(model_id: str) -> tuple[ModelPricing, bool]:
 
 @dataclass
 class ScanEstimate:
+    profile: str
     model: str
     model_label: str
     patch_model: str
@@ -81,6 +82,8 @@ def estimate_scan(
     max_scan_chars: int,
     scan_output_tokens: int,
     plan_output_tokens: int,
+    profile: str = "default",
+    patch_max_findings_per_chunk: int = 5,
     languages: list[str] | None = None,
 ) -> ScanEstimate:
     """Estimate cost and time for the full two-stage scan."""
@@ -111,8 +114,15 @@ def estimate_scan(
         scan_output_low += int(chunk_cap * SCAN_OUTPUT_RATIO_LOW)
         scan_output_high += int(chunk_cap * SCAN_OUTPUT_RATIO_HIGH)
 
-    patch_calls_low = max(chunk_count, math.ceil(total_chars / 75_000))
-    patch_calls_high = max(patch_calls_low, math.ceil(total_chars / 25_000))
+    base_patch_calls_low = max(chunk_count, math.ceil(total_chars / 75_000))
+    base_patch_calls_high = max(base_patch_calls_low, math.ceil(total_chars / 25_000))
+    coverage_multiplier = 1.0
+    if profile == "deep":
+        coverage_multiplier = 1.25
+    patch_budget_multiplier = max(1.0, patch_max_findings_per_chunk / 5.0)
+    patch_multiplier = coverage_multiplier * (1.0 + ((patch_budget_multiplier - 1.0) * 0.35))
+    patch_calls_low = max(chunk_count, math.ceil(base_patch_calls_low * patch_multiplier))
+    patch_calls_high = max(patch_calls_low, math.ceil(base_patch_calls_high * patch_multiplier))
     patch_prompt_chars_low = fix_system_chars + 4_500
     patch_prompt_chars_high = fix_system_chars + 10_500
     patch_input_low = int((patch_calls_low * patch_prompt_chars_low) / CHARS_PER_TOKEN)
@@ -163,6 +173,7 @@ def estimate_scan(
         base_time_mid=base_time_mid,
         scan_model_flash=int("flash" in model.lower()),
         patch_model_flash=int("flash" in patch_model.lower()),
+        scan_profile_deep=int(profile == "deep"),
     )
     learned = learn_adjustment(features)
     learned_samples = 0
@@ -174,6 +185,7 @@ def estimate_scan(
         learned_samples = learned.samples
 
     return ScanEstimate(
+        profile=profile,
         model=model,
         model_label=pricing.label,
         patch_model=patch_model,
@@ -223,6 +235,7 @@ def format_estimate(est: ScanEstimate) -> None:
     print(f"\n  {sep}")
     print("  Scan Estimate")
     print(f"  {sep}")
+    print(f"    Profile:     {est.profile}")
     print(f"    Model:       {est.model_label}")
     print(f"    Patch model: {est.patch_model_label}")
     print(f"    Files:       {est.file_count} files, {est.total_chars:,} chars")
