@@ -9,8 +9,8 @@ _global_env = Path.home() / ".boomai" / ".env"
 class Settings(BaseSettings):
     # Gemini API (same pattern as DataViz)
     google_api_key: str = ""
-    llm_model: str = "gemini-3-pro-preview"
-    patch_llm_model: str = "gemini-3-flash-preview"
+    llm_model: str = "gemini-3.1-pro-preview"
+    patch_llm_model: str = "gemini-3.1-flash-lite-preview"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/models"
     max_output_tokens: int = 32768
     llm_timeout: float = 300.0

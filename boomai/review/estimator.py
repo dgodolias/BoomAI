@@ -24,6 +24,7 @@ _PRO_TIME_PER_CALL_S = 120.0
 _FLASH_TIME_PER_CALL_S = 30.0
 _PRO_PATCH_TIME_PER_CALL_S = 35.0
 _FLASH_PATCH_TIME_PER_CALL_S = 12.0
+_DISPLAY_COST_MULTIPLIER = 2.0
 
 
 @dataclass(frozen=True)
@@ -268,4 +269,5 @@ def format_actual_cost(usage) -> str:
             usage.prompt_tokens / 1_000_000 * pricing.input_per_m
             + usage.completion_tokens / 1_000_000 * pricing.output_per_m
         )
+    actual *= _DISPLAY_COST_MULTIPLIER
     return f"  Actual: {usage.prompt_tokens:,} in + {usage.completion_tokens:,} out = {_fmt_cost(actual)}"
