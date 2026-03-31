@@ -107,6 +107,49 @@ def select_prompt_pack_ids(
     if save_score:
         scores["save-data-integrity"] += save_score
 
+    aliasing_score = (
+        _signal(any(token in path_text for token in ("/save/", "/record", "/cache", "/model", "/data/")))
+        + _signal(any(token in content_text for token in (
+            "clone(", "copyto(", "memberwiseclone", "shallow copy", "parseddata",
+            "magic = ", "children = ", "deep copy", "defensive copy",
+        )))
+        + _signal(any(token in content_text for token in (
+            "cached", "shared state", "mutable state", "alias", "reference field", "copied by value",
+        )))
+    )
+    if aliasing_score:
+        scores["copy-aliasing-and-mutability"] += aliasing_score
+
+    thread_safety_score = (
+        _signal(any(token in content_text for token in (
+            "static ", "lock (", "concurrentdictionary", "interlocked", "volatile ",
+            "thread", "task.run", "random.", "seed", "shared", "cache",
+        )))
+        + _signal(any(token in content_text for token in (
+            "not thread-safe", "race condition", "concurrent access", "shared dictionary",
+            "global state", "shared state corruption",
+        )))
+    )
+    if thread_safety_score:
+        scores["thread-safety-and-shared-state"] += thread_safety_score
+
+    decode_score = (
+        _signal(any(token in path_text for token in (
+            "gfxfile.cs", "flcfile.cs", "cfafile.cs", "imgfile.cs", "pakfile.cs",
+            "vidfile.cs", "skyfile.cs", "baseimagefile.cs", "texturefile.cs",
+        )))
+        + _signal(any(token in content_text for token in (
+            "rle", "framebuffer", "palette", "dstpos", "srcpos", "rowpos",
+            "array.copy", "buffer.blockcopy", "decode", "probe", "framecount",
+        )))
+        + _signal(any(token in content_text for token in (
+            "screen_copy", "screen_repeat", "pakextractedbuffer", "frame buffer",
+            "colorind", "partial frame", "run-length",
+        )))
+    )
+    if decode_score:
+        scores["unsafe-buffer-and-rle-decode"] += decode_score
+
     ordered_extras = [
         pack_id
         for pack_id, score in sorted(scores.items(), key=lambda item: (-item[1], item[0]))

@@ -12,6 +12,8 @@ The research focused on the recurring issue families already visible in BoomAI s
 - value-type copy semantics with embedded reference fields
 - checked arithmetic and overflow-sensitive allocation math
 - Unity lifecycle and hot-path behavior
+- shared mutable state and thread safety
+- buffer-copy and RLE or decode loop boundary safety
 
 ## Source-Backed Principles
 
@@ -50,6 +52,21 @@ These principles informed `core-csharp` and `save-data-integrity`.
 - Parser code that uses file-derived sizes for buffer creation or seeking needs explicit validation or checked math.
 
 These principles informed `core-csharp`, `binary-parsing`, and `save-data-integrity`.
+
+### Shared state and thread safety
+
+- Ordinary generic collections should not be assumed safe for concurrent mutation.
+- Shared mutable caches, static dictionaries, and process-wide pseudo-random state are common sources of corruption and heisenbugs.
+- Thread-safe alternatives and explicit synchronization should be preferred when concurrent access is real rather than hypothetical.
+
+These principles informed `thread-safety-and-shared-state`.
+
+### Buffer copying and decode loops
+
+- Array and buffer copy APIs have explicit argument and bounds contracts; callers must validate both source and destination capacity.
+- Decoder loops driven by file data, run lengths, or opcodes need forward-progress and boundary guarantees.
+
+These principles informed `unsafe-buffer-and-rle-decode`.
 
 ### Unity lifecycle and hot paths
 
@@ -92,20 +109,32 @@ Primary and official sources:
 10. Unity Manual, Mobile Optimization: practical scripting optimizations  
     https://docs.unity3d.com/Manual/MobileOptimizationPracticalScriptingOptimizations.html
 
+11. Microsoft Learn, Thread-safe collections  
+    https://learn.microsoft.com/en-us/dotnet/standard/collections/thread-safe/
+
+12. Microsoft Learn, `Random.Shared` API docs  
+    https://learn.microsoft.com/en-us/dotnet/api/system.random.shared?view=net-9.0
+
+13. Microsoft Learn, `Array.Copy` API docs  
+    https://learn.microsoft.com/en-us/dotnet/api/system.array.copy?view=net-9.0
+
+14. Microsoft Learn, `Buffer.BlockCopy` API docs  
+    https://learn.microsoft.com/en-us/dotnet/api/system.buffer.blockcopy?view=net-9.0
+
 Book and long-form background references:
 
-11. Joseph Albahari, *C# in a Nutshell* book page and reference material  
+15. Joseph Albahari, *C# in a Nutshell* book page and reference material  
     https://www.oreilly.com/library/view/c-in-a/0596001819/re180.html
 
-12. Jeffrey Richter, *CLR via C#*, Microsoft Press Store  
+16. Jeffrey Richter, *CLR via C#*, Microsoft Press Store  
     https://www.microsoftpressstore.com/store/clr-via-c-sharp-9780735668768
 
 Practitioner references used only as secondary support:
 
-13. Stack Overflow discussion on collection mutation during enumeration  
+17. Stack Overflow discussion on collection mutation during enumeration  
     https://stackoverflow.com/questions/5762494/invalidoperationexception-collection-was-modified-although-locking-the-collec
 
-14. Stack Overflow discussion on `OnDisable` unsubscribe pitfalls in Unity  
+18. Stack Overflow discussion on `OnDisable` unsubscribe pitfalls in Unity  
     https://stackoverflow.com/questions/58302008/problem-with-event-unsubscribing-ondisable
 
 ## Notes
