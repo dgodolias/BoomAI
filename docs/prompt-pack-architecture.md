@@ -18,6 +18,8 @@ The design intentionally separates three concerns:
 2. pack selection
 3. prompt composition and eventual caching
 
+Research notes for the current pack content live in `docs/prompt-pack-research-notes.md`.
+
 ## Goals
 
 - Make BoomAI more domain-aware for C#, Unity, parsing, streams, save-data logic, and auto-fix safety.

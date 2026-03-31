@@ -49,6 +49,7 @@ def select_prompt_pack_ids(
         + _signal(any(token in content_text for token in (
             "monobehaviour", "scriptableobject", "fixedupdate(", "update(",
             "ondestroy(", "onenable(", "ondisable(", "awake(", "start(",
+            "getcomponent(", "findobjectoftype(", "gameobject.find(",
         )))
     )
     if unity_score:
@@ -58,10 +59,12 @@ def select_prompt_pack_ids(
         _signal(any(token in path_text for token in ("/api/", "file.cs", "/formats/", "/reader/")))
         + _signal(any(token in content_text for token in (
             "binaryreader", "readbytes(", "seek(", "offset", "recordcount",
-            "position", "byte[]", "byte [", "record length",
+            "position", "byte[]", "byte [", "record length", "basestream.position",
+            "overflowexception", "framecount", "width * height", "height * width",
         )))
         + _signal(any(token in content_text for token in (
             "indexoutofrange", "outofmemory", "eof", "malformed file", "array allocation",
+            "partial read", "truncated", "unterminated string", "invalid data",
         )))
     )
     if binary_score:
@@ -74,7 +77,7 @@ def select_prompt_pack_ids(
         )))
         + _signal(any(token in content_text for token in (
             "partial read", "file handle", "resource leak", "using statement",
-            "leaveopen", "leave open",
+            "leaveopen", "leave open", "underlying stream", "readbytes return value ignored",
         )))
     )
     if stream_score:
@@ -83,10 +86,11 @@ def select_prompt_pack_ids(
     collections_score = (
         _signal(any(token in content_text for token in (
             "dictionary<", "trygetvalue", "containskey", "list<", "hashset<",
-            "nullreference", "null check", "[0]",
+            "nullreference", "null check", "[0]", "collection was modified",
         )))
         + _signal(any(token in content_text for token in (
             "keynotfound", "missing key", "null/empty", "tokens array", "effectsplit array",
+            "invalidoperationexception", "enumeration operation may not execute",
         )))
     )
     if collections_score:
@@ -96,7 +100,8 @@ def select_prompt_pack_ids(
         _signal(any(token in path_text for token in ("/save/", "savegames", "savetree", "characterrecord")))
         + _signal(any(token in content_text for token in (
             "serialize", "deserialize", "savegame", "recorddata", "streamlength",
-            "truncate", "corrupt", "save file",
+            "truncate", "corrupt", "save file", "clone(", "copyto(", "memberwiseclone",
+            "recordid", "parseddata", "shallow copy",
         )))
     )
     if save_score:
@@ -111,4 +116,3 @@ def select_prompt_pack_ids(
         if pack_id not in selected:
             selected.append(pack_id)
     return selected
-
