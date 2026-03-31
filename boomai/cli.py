@@ -651,6 +651,7 @@ def cmd_fix(args):
     """Scan entire codebase and auto-apply fixes."""
     from boomai.review.estimator import estimate_scan, format_estimate, get_pricing
     from boomai.review.estimation_history import record_run
+    from boomai.review.run_cost_report import write_run_cost_report
 
     require_api_key()
     profile = "deep" if getattr(args, "deep", False) else getattr(args, "profile", settings.scan_profile)
@@ -745,6 +746,7 @@ def cmd_fix(args):
             traceback.print_exc()
         return
     elapsed = time.monotonic() - t0
+    cost_report_path = None
     if review.usage and review.usage.api_calls > 0:
         record_run(
             features=estimate.features,
@@ -754,7 +756,18 @@ def cmd_fix(args):
             applied_count=applied_total,
             get_pricing=get_pricing,
         )
+        cost_report_path = write_run_cost_report(
+            repo_path=repo_path,
+            estimate=estimate,
+            review=review,
+            elapsed_seconds=elapsed,
+            applied_count=applied_total,
+            issue_seed_count=len(analysis.prioritized_issue_seeds),
+            languages=languages,
+        )
     print_review(review, applied=applied_total, elapsed=elapsed)
+    if cost_report_path is not None:
+        print(f"  Cost report: {cost_report_path}")
 
     if applied_total:
         print(f"  Run `git diff` to see changes.")

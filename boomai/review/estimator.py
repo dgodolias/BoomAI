@@ -35,10 +35,13 @@ class ModelPricing:
 
 
 PRICING: list[tuple[str, ModelPricing]] = [
+    ("gemini-3.1-pro-preview", ModelPricing(2.00, 12.00, "Gemini 3.1 Pro Preview")),
+    ("gemini-3.1-flash-lite-preview", ModelPricing(0.25, 1.50, "Gemini 3.1 Flash-Lite Preview")),
     ("gemini-3-pro-preview", ModelPricing(1.25, 10.00, "Gemini 3 Pro Preview")),
     ("gemini-3-flash-preview", ModelPricing(0.50, 3.00, "Gemini 3 Flash Preview")),
     ("gemini-2.5-pro", ModelPricing(1.25, 10.00, "Gemini 2.5 Pro")),
     ("gemini-2.5-flash", ModelPricing(0.30, 2.50, "Gemini 2.5 Flash")),
+    ("gemini-2.5-flash-lite-preview-09-2025", ModelPricing(0.10, 0.40, "Gemini 2.5 Flash-Lite Preview")),
 ]
 
 _UNKNOWN = ModelPricing(1.25, 10.00, "Unknown model")
@@ -231,6 +234,88 @@ def _fmt_cost(v: float) -> str:
     return f"${v:.2f}"
 
 
+def compute_usage_cost_breakdown(usage) -> dict[str, object]:
+    """Return raw and display cost attribution for a UsageStats object."""
+    per_model: dict[str, dict[str, object]] = {}
+    total_input_cost = 0.0
+    total_output_cost = 0.0
+
+    for model_name, bucket in getattr(usage, "per_model", {}).items():
+        pricing, known = get_pricing(model_name)
+        prompt_tokens = int(bucket.get("prompt_tokens", 0))
+        completion_tokens = int(bucket.get("completion_tokens", 0))
+        input_cost = prompt_tokens / 1_000_000 * pricing.input_per_m
+        output_cost = completion_tokens / 1_000_000 * pricing.output_per_m
+        total_cost = input_cost + output_cost
+        total_input_cost += input_cost
+        total_output_cost += output_cost
+        per_model[model_name] = {
+            "label": pricing.label,
+            "known_pricing": known,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "api_calls": int(bucket.get("api_calls", 0)),
+            "input_cost_usd": input_cost,
+            "output_cost_usd": output_cost,
+            "raw_cost_usd": total_cost,
+        }
+
+    per_stage: dict[str, dict[str, object]] = {}
+    for stage_name, models in getattr(usage, "per_stage_model", {}).items():
+        stage_prompt_tokens = 0
+        stage_completion_tokens = 0
+        stage_api_calls = 0
+        stage_input_cost = 0.0
+        stage_output_cost = 0.0
+        stage_models: dict[str, dict[str, object]] = {}
+        for model_name, bucket in models.items():
+            pricing, known = get_pricing(model_name)
+            prompt_tokens = int(bucket.get("prompt_tokens", 0))
+            completion_tokens = int(bucket.get("completion_tokens", 0))
+            input_cost = prompt_tokens / 1_000_000 * pricing.input_per_m
+            output_cost = completion_tokens / 1_000_000 * pricing.output_per_m
+            stage_prompt_tokens += prompt_tokens
+            stage_completion_tokens += completion_tokens
+            stage_api_calls += int(bucket.get("api_calls", 0))
+            stage_input_cost += input_cost
+            stage_output_cost += output_cost
+            stage_models[model_name] = {
+                "label": pricing.label,
+                "known_pricing": known,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "api_calls": int(bucket.get("api_calls", 0)),
+                "input_cost_usd": input_cost,
+                "output_cost_usd": output_cost,
+                "raw_cost_usd": input_cost + output_cost,
+            }
+        per_stage[stage_name] = {
+            "prompt_tokens": stage_prompt_tokens,
+            "completion_tokens": stage_completion_tokens,
+            "api_calls": stage_api_calls,
+            "input_cost_usd": stage_input_cost,
+            "output_cost_usd": stage_output_cost,
+            "raw_cost_usd": stage_input_cost + stage_output_cost,
+            "models": stage_models,
+        }
+
+    raw_cost = total_input_cost + total_output_cost
+    displayed_cost = raw_cost * _DISPLAY_COST_MULTIPLIER
+    return {
+        "prompt_tokens": int(getattr(usage, "prompt_tokens", 0)),
+        "completion_tokens": int(getattr(usage, "completion_tokens", 0)),
+        "api_calls": int(getattr(usage, "api_calls", 0)),
+        "usage_metadata_totals": dict(getattr(usage, "usage_metadata_totals", {})),
+        "raw_input_cost_usd": total_input_cost,
+        "raw_output_cost_usd": total_output_cost,
+        "raw_total_cost_usd": raw_cost,
+        "display_multiplier": _DISPLAY_COST_MULTIPLIER,
+        "display_total_cost_usd": displayed_cost,
+        "per_model": per_model,
+        "per_stage": per_stage,
+    }
+
+
 def format_estimate(est: ScanEstimate) -> None:
     sep = "-" * 42
     print(f"\n  {sep}")
@@ -255,19 +340,14 @@ def format_estimate(est: ScanEstimate) -> None:
 
 def format_actual_cost(usage) -> str:
     """Format actual cost line using per-model token accounting."""
-    actual = 0.0
-    if getattr(usage, "per_model", None):
-        for model_name, bucket in usage.per_model.items():
-            pricing, _ = get_pricing(model_name)
-            actual += (
-                bucket["prompt_tokens"] / 1_000_000 * pricing.input_per_m
-                + bucket["completion_tokens"] / 1_000_000 * pricing.output_per_m
-            )
-    else:
+    if not getattr(usage, "per_model", None):
         pricing, _ = get_pricing("gemini-2.5-pro")
         actual = (
             usage.prompt_tokens / 1_000_000 * pricing.input_per_m
             + usage.completion_tokens / 1_000_000 * pricing.output_per_m
         )
-    actual *= _DISPLAY_COST_MULTIPLIER
+        actual *= _DISPLAY_COST_MULTIPLIER
+    else:
+        breakdown = compute_usage_cost_breakdown(usage)
+        actual = float(breakdown["display_total_cost_usd"])
     return f"  Actual: {usage.prompt_tokens:,} in + {usage.completion_tokens:,} out = {_fmt_cost(actual)}"

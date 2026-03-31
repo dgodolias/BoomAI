@@ -26,18 +26,18 @@ ProgressFn = Callable[[str], None] | None
 
 # Model fallback chain — each model has separate rate limits (RPM/RPD)
 _FALLBACK_MODELS = [
-    "gemini-3-pro-preview",
-    "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+    "gemini-3.1-flash-lite-preview",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite-preview-09-2025",
 ]
 
 _PATCH_FALLBACK_MODELS = [
-    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite-preview-09-2025",
-    "gemini-3-pro-preview",
+    "gemini-3.1-pro-preview",
     "gemini-2.5-pro",
 ]
 
@@ -660,7 +660,21 @@ async def _generate_fix_for_finding(
 
     result = response.json()
     if usage:
-        usage.add(result, model_chain.current if model_chain else settings.patch_llm_model)
+        usage.add(
+            result,
+            model_chain.current if model_chain else settings.patch_llm_model,
+            stage="patch",
+            request_label=label or finding.file,
+            extra={
+                "target_file": finding.file,
+                "line": finding.line,
+                "selected_pack_ids": selected_pack_ids,
+                "system_prompt_chars": len(system_prompt),
+                "user_message_chars": len(user_message),
+                "target_context_chars": len(target_context),
+                "related_snippet_count": len(related_snippets),
+            },
+        )
     candidates = result.get("candidates") or []
     if not candidates:
         return None
@@ -850,7 +864,20 @@ async def _plan_chunks(
     try:
         result = response.json()
         if usage:
-            usage.add(result, model_chain.current if model_chain else settings.llm_model)
+            usage.add(
+                result,
+                model_chain.current if model_chain else settings.llm_model,
+                stage="plan",
+                request_label="planning",
+                extra={
+                    "file_count": total_files,
+                    "total_chars": total_chars,
+                    "char_budget": char_budget,
+                    "repo_map_chars": len(repo_map),
+                    "system_prompt_chars": len(system_prompt),
+                    "user_message_chars": len(user_message),
+                },
+            )
         text = result["candidates"][0]["content"]["parts"][0]["text"]
         sanitized = _sanitize_json(text)
         data = json.loads(sanitized)
@@ -1175,7 +1202,24 @@ async def _scan_chunk(
 
     result = response.json()
     if usage:
-        usage.add(result, model_chain.current if model_chain else settings.llm_model)
+        usage.add(
+            result,
+            model_chain.current if model_chain else settings.llm_model,
+            stage="scan",
+            request_label=chunk_info,
+            extra={
+                "chunk_file_count": len(file_contents),
+                "chunk_chars": chunk_chars,
+                "issue_seed_count": len(chunk_issue_seeds),
+                "related_snippet_count": len(related_snippets),
+                "selected_pack_ids": selected_pack_ids,
+                "system_prompt_chars": len(system_prompt),
+                "user_message_chars": len(user_message),
+                "max_output_tokens": output_tokens,
+                "degraded_mode": degraded_mode,
+                "parse_retries_remaining": parse_retries_remaining,
+            },
+        )
 
     if "error" in result:
         logger.error(f"Gemini API error: {result['error'].get('message', 'Unknown')}")
