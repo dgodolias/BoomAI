@@ -304,6 +304,10 @@ def _parse_review_response(text: str) -> tuple[ReviewSummary, str]:
                     end_line=f.get("end_line"),
                     severity=severity,
                     body=f["message"],
+                    category=str(f.get("category", "") or "").lower() or None,
+                    confidence=str(f.get("confidence", "") or "").lower() or None,
+                    fixable=f.get("fixable") if isinstance(f.get("fixable"), bool) else None,
+                    patch_group_key=str(f.get("patch_group_key", "") or "") or None,
                     suggestion=f.get("suggestion"),
                     old_code=f.get("old_code"),
                 )
@@ -344,6 +348,15 @@ def _parse_review_response(text: str) -> tuple[ReviewSummary, str]:
 def _is_fix_worthy(finding: ReviewComment) -> bool:
     """Return True when a finding should get a dedicated patch-generation pass."""
     lowered = finding.body.lower()
+    if finding.fixable is False:
+        return False
+    if finding.fixable is True:
+        if finding.severity in {Severity.LOW, Severity.INFO}:
+            return False
+        if finding.confidence == "low" and finding.severity == Severity.MEDIUM:
+            return False
+        return True
+
     noisy_patterns = (
         "incomplete feature",
         "requires confirmation",
@@ -400,6 +413,16 @@ def _is_fix_worthy(finding: ReviewComment) -> bool:
 def _is_high_value_finding(finding: ReviewComment) -> bool:
     """Filter out low-signal findings so final output stays bug-first."""
     lowered = finding.body.lower()
+    high_value_categories = {
+        "correctness",
+        "security",
+        "resource",
+        "lifecycle",
+        "threading",
+        "bounds",
+        "data-integrity",
+        "api-contract",
+    }
 
     if finding.severity in {Severity.CRITICAL, Severity.HIGH}:
         return True
@@ -418,6 +441,13 @@ def _is_high_value_finding(finding: ReviewComment) -> bool:
         return False
 
     if settings.scan_profile == "deep":
+        if finding.confidence == "low" and finding.category not in high_value_categories:
+            return False
+        return finding.severity not in {Severity.LOW, Severity.INFO}
+
+    if finding.category in high_value_categories:
+        if finding.confidence == "low" and finding.severity == Severity.MEDIUM:
+            return False
         return finding.severity not in {Severity.LOW, Severity.INFO}
 
     medium_keep_patterns = (
@@ -519,35 +549,153 @@ def _extract_patch_context(content: str, line: int) -> tuple[str, str]:
     return (f"lines {start + 1}-{end}", snippet)
 
 
-def _parse_fix_response(text: str, default_finding: ReviewComment) -> ReviewComment | None:
-    """Parse a single structured edit response."""
+def _extract_patch_context_for_findings(
+    content: str,
+    findings: list[ReviewComment],
+) -> tuple[str, str]:
+    """Return one bounded line window covering a local patch set."""
+    lines = content.replace("\r\n", "\n").split("\n")
+    if not lines or not findings:
+        return ("whole file", content)
+
+    radius = max(12, settings.patch_context_lines)
+    min_line = min(f.line for f in findings)
+    max_line = max((f.end_line or f.line) for f in findings)
+    start = max(0, min_line - 1 - radius)
+    end = min(len(lines), max_line + radius)
+    snippet = "\n".join(lines[start:end])
+    return (f"lines {start + 1}-{end}", snippet)
+
+
+def _group_actionable_findings(findings: list[ReviewComment]) -> list[list[ReviewComment]]:
+    """Group findings by file and nearby patch-set so one API call can fix several."""
+    if not findings:
+        return []
+
+    by_file: dict[str, list[ReviewComment]] = {}
+    for finding in findings:
+        by_file.setdefault(finding.file, []).append(finding)
+
+    groups: list[list[ReviewComment]] = []
+    proximity_threshold = max(20, settings.patch_context_lines // 2)
+
+    for file_findings in by_file.values():
+        file_findings.sort(key=lambda item: (item.line, item.end_line or item.line, item.body))
+        keyed: dict[str, list[ReviewComment]] = {}
+        unkeyed: list[ReviewComment] = []
+        for finding in file_findings:
+            key = (finding.patch_group_key or "").strip()
+            if key:
+                keyed.setdefault(key, []).append(finding)
+            else:
+                unkeyed.append(finding)
+
+        groups.extend(keyed.values())
+
+        current: list[ReviewComment] = []
+        current_end = -1
+        for finding in unkeyed:
+            finding_start = finding.line
+            finding_end = finding.end_line or finding.line
+            if not current:
+                current = [finding]
+                current_end = finding_end
+                continue
+            if (
+                finding_start - current_end <= proximity_threshold
+                and len(current) < 4
+            ):
+                current.append(finding)
+                current_end = max(current_end, finding_end)
+                continue
+            groups.append(current)
+            current = [finding]
+            current_end = finding_end
+        if current:
+            groups.append(current)
+
+    def _group_sort_key(group: list[ReviewComment]) -> tuple[int, int, str, int]:
+        top_priority = max((_fix_priority(item) for item in group), default=(0, 0))
+        severity_score, safety_bonus = top_priority
+        return (-severity_score, -safety_bonus, group[0].file, group[0].line)
+
+    groups.sort(
+        key=_group_sort_key
+    )
+    return groups
+
+
+def _parse_fix_response(
+    text: str,
+    default_findings: list[ReviewComment],
+) -> list[tuple[list[int], ReviewComment]]:
+    """Parse grouped patch response into indexed edits."""
     try:
         sanitized = _sanitize_json(text)
         decoder = json.JSONDecoder()
         data, _ = decoder.raw_decode(sanitized)
     except (json.JSONDecodeError, TypeError):
-        return None
+        return []
 
-    old_code = data.get("old_code", "")
-    suggestion = data.get("suggestion", "")
-    if not isinstance(old_code, str) or not isinstance(suggestion, str):
-        return None
-    if not old_code.strip() and not suggestion.strip():
-        return None
+    raw_edits = data.get("edits", [])
+    if isinstance(raw_edits, dict):
+        raw_edits = [raw_edits]
+    if not isinstance(raw_edits, list):
+        return []
 
-    return ReviewComment(
-        file=str(data.get("file", default_finding.file)),
-        line=int(data.get("line", default_finding.line)),
-        end_line=data.get("end_line", default_finding.end_line),
-        severity=default_finding.severity,
-        body=str(data.get("message", default_finding.body)),
-        old_code=old_code,
-        suggestion=suggestion,
-    )
+    parsed: list[tuple[list[int], ReviewComment]] = []
+    for item in raw_edits:
+        if not isinstance(item, dict):
+            continue
+        finding_indices = item.get("finding_indices")
+        if not isinstance(finding_indices, list) or not finding_indices:
+            single_index = item.get("finding_index")
+            if isinstance(single_index, int):
+                finding_indices = [single_index]
+            else:
+                continue
+
+        normalized_indices: list[int] = []
+        for index in finding_indices:
+            if not isinstance(index, int):
+                continue
+            if 1 <= index <= len(default_findings) and index not in normalized_indices:
+                normalized_indices.append(index)
+        if not normalized_indices:
+            continue
+
+        primary = default_findings[normalized_indices[0] - 1]
+        old_code = item.get("old_code", "")
+        suggestion = item.get("suggestion", "")
+        if not isinstance(old_code, str) or not isinstance(suggestion, str):
+            continue
+        if not old_code.strip() and not suggestion.strip():
+            continue
+
+        parsed.append(
+            (
+                normalized_indices,
+                ReviewComment(
+                    file=str(item.get("file", primary.file)),
+                    line=int(item.get("line", primary.line)),
+                    end_line=item.get("end_line", primary.end_line),
+                    severity=primary.severity,
+                    body=str(item.get("message", primary.body)),
+                    old_code=old_code,
+                    suggestion=suggestion,
+                ),
+            )
+        )
+    return parsed
 
 
-async def _generate_fix_for_finding(
-    finding: ReviewComment,
+def _finding_patch_key(finding: ReviewComment) -> tuple[str, int, str]:
+    """Stable key for attaching generated edits back to original findings."""
+    return (finding.file, finding.line, finding.body)
+
+
+async def _generate_fixes_for_group(
+    findings: list[ReviewComment],
     repo_file_map: dict[str, str],
     issue_seeds: list[IssueSeed] | None = None,
     code_index=None,
@@ -556,35 +704,43 @@ async def _generate_fix_for_finding(
     usage: UsageStats | None = None,
     model_chain: _ModelChain | None = None,
     label: str = "",
-) -> ReviewComment | None:
-    """Generate one structured edit for a finding."""
-    target_content = repo_file_map.get(finding.file)
-    if target_content is None:
-        return None
-    target_context_label, target_context = _extract_patch_context(target_content, finding.line)
+) -> dict[tuple[str, int, str], ReviewComment]:
+    """Generate structured edits for one local patch-set."""
+    if not findings:
+        return {}
 
-    related_snippets = []
-    matching_seed = None
+    target_file = findings[0].file
+    target_content = repo_file_map.get(target_file)
+    if target_content is None:
+        return {}
+    target_context_label, target_context = _extract_patch_context_for_findings(target_content, findings)
+
+    min_line = min(finding.line for finding in findings)
+    max_line = max((finding.end_line or finding.line) for finding in findings)
+    matching_seeds: list[IssueSeed] = []
     if issue_seeds is not None:
         for seed in issue_seeds:
-            if seed.file == finding.file and abs(seed.line - finding.line) <= 3:
-                matching_seed = seed
-                break
+            if seed.file != target_file:
+                continue
+            if min_line - 8 <= seed.line <= max_line + 8:
+                matching_seeds.append(seed)
+
+    related_snippets = []
 
     if code_index is not None:
         from ..context.retriever import retrieve_related_context
 
         retrieval = retrieve_related_context(
-            primary_files=[finding.file],
+            primary_files=[target_file],
             repo_file_map=repo_file_map,
             code_index=code_index,
-            issue_seeds=[matching_seed] if matching_seed is not None else None,
+            issue_seeds=matching_seeds or None,
         )
         related_snippets = retrieval.snippets[:2]
 
     selected_pack_ids = select_prompt_pack_ids(
-        [(finding.file, target_context)],
-        issue_seeds=[finding],
+        [(target_file, target_context)],
+        issue_seeds=[*findings, *matching_seeds],
         stage="fix",
         max_extra_packs=settings.prompt_pack_fix_max_extras,
     )
@@ -594,14 +750,15 @@ async def _generate_fix_for_finding(
         selected_pack_ids=selected_pack_ids,
     )
     user_message = build_fix_user_message(
-        finding=matching_seed,
-        review_finding=finding,
-        target_file=finding.file,
+        findings=findings,
+        static_hints=matching_seeds,
+        target_file=target_file,
         target_content=target_context,
         target_context_label=target_context_label,
         related_snippets=related_snippets,
     )
     output_tokens = settings.patch_output_tokens
+    model_name = model_chain.current if model_chain else settings.patch_llm_model
     url = model_chain.build_url() if model_chain else (
         f"{settings.gemini_base_url}/{settings.patch_llm_model}"
         f":generateContent?key={settings.google_api_key}"
@@ -622,7 +779,7 @@ async def _generate_fix_for_finding(
                     "system_instruction": {"parts": [{"text": system_prompt}]},
                     "contents": [{"role": "user", "parts": [{"text": user_message}]}],
                     "generationConfig": _build_generation_config(
-                        model_chain.current if model_chain else settings.llm_model,
+                        model_name,
                         output_tokens,
                         response_json_schema=build_fix_response_schema(),
                     ),
@@ -633,18 +790,18 @@ async def _generate_fix_for_finding(
             label=f"{label} patch" if label else "Generating patch",
         )
     except asyncio.TimeoutError:
-        return None
+        return {}
 
     if response is None:
-        return None
+        return {}
     if response.status_code == 429 and model_chain:
         failed_model = model_chain.current
         next_model = await model_chain.advance(failed_model)
         if next_model:
             if on_progress:
                 on_progress(f"  {label} patch - rate limited on {failed_model}, switching to {next_model}")
-            return await _generate_fix_for_finding(
-                finding=finding,
+            return await _generate_fixes_for_group(
+                findings=findings,
                 repo_file_map=repo_file_map,
                 issue_seeds=issue_seeds,
                 code_index=code_index,
@@ -654,20 +811,22 @@ async def _generate_fix_for_finding(
                 model_chain=model_chain,
                 label=label,
             )
-        return None
+        return {}
     if response.status_code != 200:
-        return None
+        return {}
 
     result = response.json()
     if usage:
         usage.add(
             result,
-            model_chain.current if model_chain else settings.patch_llm_model,
+            model_name,
             stage="patch",
-            request_label=label or finding.file,
+            request_label=label or target_file,
             extra={
-                "target_file": finding.file,
-                "line": finding.line,
+                "target_file": target_file,
+                "finding_count": len(findings),
+                "finding_lines": [finding.line for finding in findings],
+                "patch_group_keys": [finding.patch_group_key or "" for finding in findings],
                 "selected_pack_ids": selected_pack_ids,
                 "system_prompt_chars": len(system_prompt),
                 "user_message_chars": len(user_message),
@@ -677,13 +836,19 @@ async def _generate_fix_for_finding(
         )
     candidates = result.get("candidates") or []
     if not candidates:
-        return None
+        return {}
     try:
         text = candidates[0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError):
-        return None
+        return {}
 
-    return _parse_fix_response(text, finding)
+    patch_index: dict[tuple[str, int, str], ReviewComment] = {}
+    for finding_indices, patch in _parse_fix_response(text, findings):
+        for index in finding_indices:
+            original = findings[index - 1]
+            patch_index.setdefault(_finding_patch_key(original), patch)
+
+    return patch_index
 
 
 async def _attach_fixes_for_chunk(
@@ -704,23 +869,35 @@ async def _attach_fixes_for_chunk(
     if not actionable:
         return review
 
-    actionable.sort(key=_fix_priority, reverse=True)
-    actionable = actionable[: settings.patch_max_findings_per_chunk]
-    if on_progress and len(actionable) > 1:
+    grouped_actionable = _group_actionable_findings(actionable)
+    selected_groups: list[list[ReviewComment]] = []
+    selected_count = 0
+    for group in grouped_actionable:
+        group_size = len(group)
+        if selected_groups and selected_count + group_size > settings.patch_max_findings_per_chunk:
+            break
+        selected_groups.append(group)
+        selected_count += group_size
+
+    if not selected_groups:
+        return review
+
+    if on_progress and selected_count > 1:
         on_progress(
-            f"  {chunk_label} patching {len(actionable)} finding(s) "
-            f"[{_compute_patch_concurrency(settings.patch_llm_model, len(actionable))} concurrent]"
+            f"  {chunk_label} patching {selected_count} finding(s) across "
+            f"{len(selected_groups)} patch set(s) "
+            f"[{_compute_patch_concurrency(settings.patch_llm_model, len(selected_groups))} concurrent]"
         )
 
     patch_index: dict[tuple[str, int, str], ReviewComment] = {}
-    patch_concurrency = _compute_patch_concurrency(settings.patch_llm_model, len(actionable))
+    patch_concurrency = _compute_patch_concurrency(settings.patch_llm_model, len(selected_groups))
     sem = asyncio.Semaphore(patch_concurrency)
 
-    async def _run_patch(idx: int, finding: ReviewComment) -> ReviewComment | None:
+    async def _run_patch(idx: int, group: list[ReviewComment]) -> dict[tuple[str, int, str], ReviewComment]:
         async with sem:
-            label = f"{chunk_label} fix {idx}/{len(actionable)}".strip()
-            return await _generate_fix_for_finding(
-                finding=finding,
+            label = f"{chunk_label} patch-set {idx}/{len(selected_groups)}".strip()
+            return await _generate_fixes_for_group(
+                findings=group,
                 repo_file_map=repo_file_map,
                 issue_seeds=issue_seeds,
                 code_index=code_index,
@@ -731,16 +908,15 @@ async def _attach_fixes_for_chunk(
                 label=label,
             )
 
-    patches = await asyncio.gather(
-        *[_run_patch(idx, finding) for idx, finding in enumerate(actionable, 1)]
+    patch_maps = await asyncio.gather(
+        *[_run_patch(idx, group) for idx, group in enumerate(selected_groups, 1)]
     )
-    for finding, patch in zip(actionable, patches):
-        if patch is not None:
-            patch_index[(finding.file, finding.line, finding.body)] = patch
+    for patch_map in patch_maps:
+        patch_index.update(patch_map)
 
     updated: list[ReviewComment] = []
     for finding in review.findings:
-        patch = patch_index.get((finding.file, finding.line, finding.body))
+        patch = patch_index.get(_finding_patch_key(finding))
         if patch is None:
             updated.append(finding)
             continue
@@ -751,6 +927,10 @@ async def _attach_fixes_for_chunk(
                 end_line=patch.end_line or finding.end_line,
                 severity=finding.severity,
                 body=finding.body,
+                category=finding.category,
+                confidence=finding.confidence,
+                fixable=finding.fixable,
+                patch_group_key=finding.patch_group_key,
                 old_code=patch.old_code,
                 suggestion=patch.suggestion,
             )
@@ -1365,7 +1545,7 @@ async def scan_with_gemini(
     """Send full file contents + static findings to Gemini for codebase scan.
 
     on_chunk_done is called with each chunk's ReviewSummary as soon as it
-    completes, enabling incremental apply (chunks have disjoint file sets).
+    completes for progress/reporting hooks.
     """
     if detected_languages is None:
         detected_languages = []

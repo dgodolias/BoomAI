@@ -73,8 +73,39 @@ def build_scan_response_schema() -> dict:
                 "enum": ["critical", "high", "medium", "low", "info"],
             },
             "message": {"type": "string"},
+            "category": {
+                "type": "string",
+                "enum": [
+                    "correctness",
+                    "security",
+                    "resource",
+                    "performance",
+                    "lifecycle",
+                    "threading",
+                    "bounds",
+                    "data-integrity",
+                    "api-contract",
+                    "maintainability",
+                    "other",
+                ],
+            },
+            "confidence": {
+                "type": "string",
+                "enum": ["high", "medium", "low"],
+            },
+            "fixable": {"type": "boolean"},
+            "patch_group_key": {"type": "string"},
         },
-        "required": ["file", "line", "severity", "message"],
+        "required": [
+            "file",
+            "line",
+            "severity",
+            "message",
+            "category",
+            "confidence",
+            "fixable",
+            "patch_group_key",
+        ],
         "additionalProperties": False,
     }
     return {
@@ -98,16 +129,30 @@ def build_fix_response_schema() -> dict:
     return {
         "type": "object",
         "properties": {
-            "file": {"type": "string"},
-            "line": {"type": "integer"},
-            "end_line": {"type": "integer"},
-            "message": {"type": "string"},
-            "old_code": {"type": "string"},
-            "suggestion": {"type": "string"},
+            "edits": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "finding_indices": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                        },
+                        "file": {"type": "string"},
+                        "line": {"type": "integer"},
+                        "end_line": {"type": "integer"},
+                        "message": {"type": "string"},
+                        "old_code": {"type": "string"},
+                        "suggestion": {"type": "string"},
+                    },
+                    "required": ["finding_indices", "file", "line", "old_code", "suggestion"],
+                    "additionalProperties": False,
+                },
+            },
         },
-        "required": ["file", "line", "old_code", "suggestion"],
+        "required": ["edits"],
         "additionalProperties": False,
-        "propertyOrdering": ["file", "line", "end_line", "message", "old_code", "suggestion"],
+        "propertyOrdering": ["edits"],
     }
 
 
@@ -197,7 +242,11 @@ def build_scan_system_prompt(
         '      "file": "path/to/file.ext",',
         '      "line": 42,',
         '      "severity": "high",',
-        '      "message": "Clear explanation of the issue and WHY it matters"',
+        '      "message": "Clear explanation of the issue and WHY it matters",',
+        '      "category": "correctness",',
+        '      "confidence": "high",',
+        '      "fixable": true,',
+        '      "patch_group_key": "bounds-guard-1"',
         "    }",
         "  ],",
         '  "critical_count": 0',
@@ -205,6 +254,10 @@ def build_scan_system_prompt(
         "",
         "## Rules",
         "- severity must be one of: critical, high, medium, low, info",
+        "- category must be one of: correctness, security, resource, performance, lifecycle, threading, bounds, data-integrity, api-contract, maintainability, other",
+        "- confidence must be high, medium, or low based on code evidence visible in the provided context",
+        "- fixable must be true only when a small local code patch inside this repo can likely fix the issue safely",
+        "- patch_group_key must group findings in the SAME file that should be fixed together in one local patch; otherwise use an empty string",
         "- line numbers are for reference only (to help locate the issue)",
         "",
         "## Finding Rules",
@@ -233,31 +286,39 @@ def build_fix_system_prompt(
     comments: bool = False,
     selected_pack_ids: list[str] | None = None,
 ) -> str:
-    """Build system prompt for single-finding patch generation."""
+    """Build system prompt for grouped patch generation."""
     parts = [
         "You are BoomAI's patch generation module.",
-        "You receive one previously-identified finding plus the target file and optional related snippets.",
-        "Generate ONE small, safe structured edit that fixes the finding.",
+        "You receive one target file, one local context window, one or more findings, and optional related snippets.",
+        "Generate zero or more small, safe structured edits for that local patch set.",
         "",
         "## Output Format",
         "You MUST respond with valid JSON in this exact structure:",
         "{",
-        '  "file": "path/to/file.ext",',
-        '  "line": 42,',
-        '  "end_line": 45,',
-        '  "message": "Short patch summary",',
-        '  "old_code": "exact code to replace",',
-        '  "suggestion": "exact replacement code"',
+        '  "edits": [',
+        "    {",
+        '      "finding_indices": [1],',
+        '      "file": "path/to/file.ext",',
+        '      "line": 42,',
+        '      "end_line": 45,',
+        '      "message": "Short patch summary",',
+        '      "old_code": "exact code to replace",',
+        '      "suggestion": "exact replacement code"',
+        "    }",
+        "  ]",
         "}",
         "",
         "## Rules",
+        "- edits may be empty if no safe exact patch can be produced",
+        "- finding_indices must reference the numbered findings from the user message",
         "- old_code must be copied EXACTLY from the target file with original indentation",
         "- Prefer the SMALLEST unique exact snippet that identifies the change safely",
         "- suggestion must be valid, syntactically correct code only",
         "- NEVER return natural-language instructions in old_code or suggestion",
         "- Keep the edit SMALL and SURGICAL (max about 30 changed lines)",
         '- To delete code, set suggestion to an empty string ("")',
-        "- If you cannot produce a safe exact edit, return old_code and suggestion as empty strings",
+        "- If one change safely fixes multiple findings, reference all of them in one finding_indices array",
+        "- If you cannot produce a safe exact edit for a finding, omit it instead of guessing",
         "- Respond with JSON only",
     ]
     if comments:
@@ -268,14 +329,14 @@ def build_fix_system_prompt(
 
 
 def build_fix_user_message(
-    finding: IssueSeed | None,
-    review_finding,
+    findings: list,
+    static_hints: list[IssueSeed],
     target_file: str,
     target_content: str,
     target_context_label: str,
     related_snippets: list[ContextSnippet] | None = None,
 ) -> str:
-    """Build user message for single-finding patch generation."""
+    """Build user message for grouped patch generation."""
     related_snippets = related_snippets or []
 
     related_context_text = ""
@@ -290,20 +351,23 @@ def build_fix_user_message(
             lines.append("")
         related_context_text = "\n".join(lines).rstrip()
 
-    seed_text = ""
-    if finding is not None:
-        seed_text = (
-            f"\nStatic hint: {finding.file}:{finding.line} "
-            f"[{finding.source.value}/{finding.severity.value}] {finding.rule_id}: {finding.message}"
+    finding_lines = ["## Findings To Patch"]
+    static_hint_map = {(hint.file, hint.line): hint for hint in static_hints}
+    for index, review_finding in enumerate(findings, 1):
+        hint = static_hint_map.get((review_finding.file, review_finding.line))
+        finding_lines.append(
+            f"{index}. {review_finding.file}:{review_finding.line} "
+            f"[{review_finding.severity.value}] {review_finding.body}"
         )
+        if hint is not None:
+            finding_lines.append(
+                f"   Static hint: [{hint.source.value}/{hint.severity.value}] {hint.rule_id}: {hint.message}"
+            )
+    findings_text = "\n".join(finding_lines)
 
-    return f"""## Single Finding Patch Generation
+    return f"""## Local Patch Set Generation
 
-Target finding:
-- File: {review_finding.file}
-- Line: {review_finding.line}
-- Severity: {review_finding.severity.value}
-- Message: {review_finding.body}{seed_text}
+{findings_text}
 
 ## Target File Context
 ### File: {target_file} ({target_context_label})
@@ -313,7 +377,7 @@ Target finding:
 
 {related_context_text}
 
-Generate one exact structured edit for this finding only.
+Generate zero or more exact structured edits for this patch set.
 Use ONLY the target file context above when copying old_code."""
 
 

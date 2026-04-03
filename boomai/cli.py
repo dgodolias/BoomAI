@@ -823,19 +823,9 @@ def cmd_fix(args):
         on_progress=lambda msg: print(f"  {msg}"),
     )
 
-    applied_total = 0
-
-    def _on_chunk_done(chunk_review):
-        nonlocal applied_total
-        if chunk_review.findings:
-            print(f"\n  Applying fixes...")
-            count = apply_local(chunk_review.findings, repo_path)
-            applied_total += count
-
     try:
         review = asyncio.run(run_local_scan(
             repo_path, comments=comments,
-            on_chunk_done=_on_chunk_done,
             file_contents=file_contents,
             issue_seeds=analysis.prioritized_issue_seeds,
             code_index=code_index,
@@ -845,6 +835,10 @@ def cmd_fix(args):
         if settings.scan_debug:
             traceback.print_exc()
         return
+    applied_total = 0
+    if review.findings:
+        print(f"\n  Applying fixes...")
+        applied_total = apply_local(review.findings, repo_path)
     elapsed = time.monotonic() - t0
     cost_report_path = None
     if cost_reporting_enabled and review.usage and review.usage.api_calls > 0:

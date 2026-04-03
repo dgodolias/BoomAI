@@ -48,6 +48,10 @@ class ReviewComment(BaseModel):
     end_line: int | None = None
     severity: Severity = Severity.MEDIUM
     body: str
+    category: str | None = None
+    confidence: str | None = None
+    fixable: bool | None = None
+    patch_group_key: str | None = None
     suggestion: str | None = None
     old_code: str | None = None
 
