@@ -499,19 +499,12 @@ class _ScanProgressDisplay:
         filled = int(round(width * ratio))
         bar = "#" * filled + "." * (width - filled)
         percent = int(round(ratio * 100))
-        suffix = (
-            f"({self._fmt_units(self.completed_weight)}/"
-            f"{self._fmt_units(self.total_weight)} done"
-        )
-        if active_chunks:
-            suffix += f", {active_chunks} active"
-        suffix += ")"
         spinner = ""
         if active_chunks and self.completed_weight < self.total_weight:
             spinner = f" {self._spinner_frames[self._spinner_index % len(self._spinner_frames)]}"
             self._spinner_index += 1
         sys.stdout.write(
-            f"\r  Scan progress: [{bar}] {percent:3d}% {suffix}{spinner}"
+            f"\r  Scan progress: [{bar}] {percent:3d}%{spinner}"
         )
         sys.stdout.flush()
         self._bar_visible = True
