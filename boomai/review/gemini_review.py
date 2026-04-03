@@ -13,6 +13,7 @@ import httpx
 from ..core.config import settings
 from ..core.models import IssueSeed, ReviewComment, ReviewSummary, Severity, UsageStats
 from .pack_selector import select_prompt_pack_ids
+from .progress_history import ChunkProgressFeatures, record_chunk_elapsed
 from .prompts import (
     build_scan_system_prompt, build_scan_user_message,
     build_plan_prompt, build_plan_response_schema, build_plan_user_message,
@@ -685,6 +686,10 @@ def _fix_priority(finding: ReviewComment) -> tuple[int, int]:
     elif any(token in lowered for token in ("invalidcast", "argumentoutofrange", "cleanup", "continue")):
         safety_bonus = 1
     return (severity_score, safety_bonus)
+
+
+def _chunk_split_depth(label: str) -> int:
+    return max(0, len(label.replace("[", "").replace("]", "").split("/")) - 2)
 
 
 def _extract_patch_context(content: str, line: int) -> tuple[str, str]:
@@ -1788,6 +1793,7 @@ async def scan_with_gemini(
         async def _review_single(
             chunk: list[tuple[str, str]], label: str,
         ) -> ReviewSummary:
+            started_at = time.monotonic()
             chunk_model_chain = _ModelChain(settings.llm_model)
             result = await _scan_chunk(
                 chunk, detected_languages, label,
@@ -1828,6 +1834,16 @@ async def scan_with_gemini(
                 usage=usage,
                 chunk_label=label,
             )
+            record_chunk_elapsed(
+                ChunkProgressFeatures(
+                    chunk_chars=sum(len(content) for _, content in chunk),
+                    file_count=len(chunk),
+                    split_depth=_chunk_split_depth(label),
+                    scan_model_flash=int("flash" in settings.llm_model.lower()),
+                    profile_deep=int(settings.scan_profile == "deep"),
+                ),
+                time.monotonic() - started_at,
+            )
             _emit(f"{label} completed")
             return attached
 
@@ -1854,6 +1870,7 @@ async def scan_with_gemini(
         """Scan a chunk; on failure, split in half and retry sub-chunks."""
         if stop_event.is_set():
             return _rate_limited_review()
+        started_at = time.monotonic()
         chars = sum(len(c) for _, c in chunk)
         _emit(f"{label} {len(chunk)} files, {chars:,} chars...")
         chunk_model_chain = _ModelChain(settings.llm_model)
@@ -1900,6 +1917,16 @@ async def scan_with_gemini(
             on_progress=on_progress,
             usage=usage,
             chunk_label=label,
+        )
+        record_chunk_elapsed(
+            ChunkProgressFeatures(
+                chunk_chars=chars,
+                file_count=len(chunk),
+                split_depth=_chunk_split_depth(label),
+                scan_model_flash=int("flash" in settings.llm_model.lower()),
+                profile_deep=int(settings.scan_profile == "deep"),
+            ),
+            time.monotonic() - started_at,
         )
         _emit(f"{label} completed")
         return attached

@@ -24,6 +24,7 @@ from boomai.app.orchestrator import run_static_analysis_suite
 from boomai.context.indexer import build_code_index
 from boomai.core.config import settings
 from boomai.core.models import ReviewSummary
+from boomai.review.progress_history import ChunkProgressFeatures, predict_chunk_elapsed_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -455,9 +456,11 @@ def _format_elapsed(seconds: float) -> str:
 class _ScanProgressDisplay:
     """Verbose debug logs or a compact progress bar, depending on scan_debug."""
 
-    def __init__(self, *, debug: bool, total_files: int = 0):
+    def __init__(self, *, debug: bool, total_files: int = 0, scan_model: str = "", profile: str = "default"):
         self.debug = debug
         self.total_files = max(0, int(total_files))
+        self.scan_model = scan_model
+        self.profile = profile
         self.total_chunks = 0
         self.total_weight = 0.0
         self.completed_weight = 0.0
@@ -465,6 +468,9 @@ class _ScanProgressDisplay:
         self.completed_labels: set[str] = set()
         self.active_labels: set[str] = set()
         self.label_file_counts: dict[str, int] = {}
+        self.label_char_counts: dict[str, int] = {}
+        self.label_started_at: dict[str, float] = {}
+        self.label_expected_seconds: dict[str, float] = {}
         self._bar_visible = False
         self._spinner_frames = "|/-\\"
         self._spinner_index = 0
@@ -497,8 +503,18 @@ class _ScanProgressDisplay:
             return
         if self.total_files > 0:
             total_units = float(self.total_files)
-            completed_units = float(self.completed_files)
-            suffix = f" ({self.completed_files}/{self.total_files} file coverage)"
+            estimated_units = float(self.completed_files)
+            now = time.monotonic()
+            for label in self.active_labels:
+                file_count = self.label_file_counts.get(label, 0)
+                started_at = self.label_started_at.get(label, now)
+                expected = self.label_expected_seconds.get(label, 0.0)
+                if file_count <= 0 or expected <= 0:
+                    continue
+                active_ratio = min(0.95, max(0.0, (now - started_at) / expected))
+                estimated_units += file_count * active_ratio
+            completed_units = min(total_units, estimated_units)
+            suffix = f" (est. {completed_units:.0f}/{self.total_files} files)"
         else:
             if self.total_weight <= 0:
                 return
@@ -551,12 +567,26 @@ class _ScanProgressDisplay:
             print("  Reviewing code...")
             return
 
-        chunk_start = re.match(r"(\[\d+/\d+\](?:/[A-Za-z0-9_-]+)*)\s+(\d+)\s+files,\s+[\d,]+\s+chars\.\.\.", plain)
+        chunk_start = re.match(r"(\[\d+/\d+\](?:/[A-Za-z0-9_-]+)*)\s+(\d+)\s+files,\s+([\d,]+)\s+chars\.\.\.", plain)
         if chunk_start:
             label = self._normalize_label(chunk_start.group(1))
             file_count = int(chunk_start.group(2))
+            char_count = int(chunk_start.group(3).replace(",", ""))
             self.active_labels.add(label)
             self.label_file_counts[label] = file_count
+            self.label_char_counts[label] = char_count
+            self.label_started_at[label] = time.monotonic()
+            split_depth = max(0, len(label.split("/")) - 2)
+            predicted_seconds, _ = predict_chunk_elapsed_seconds(
+                ChunkProgressFeatures(
+                    chunk_chars=char_count,
+                    file_count=file_count,
+                    split_depth=split_depth,
+                    scan_model_flash=int("flash" in self.scan_model.lower()),
+                    profile_deep=int(self.profile == "deep"),
+                )
+            )
+            self.label_expected_seconds[label] = predicted_seconds
             self._render_bar()
             return
 
@@ -564,6 +594,8 @@ class _ScanProgressDisplay:
         if split:
             label = self._normalize_label(split.group(1))
             self.active_labels.discard(label)
+            self.label_started_at.pop(label, None)
+            self.label_expected_seconds.pop(label, None)
             self._render_bar()
             return
 
@@ -579,6 +611,8 @@ class _ScanProgressDisplay:
                         self.completed_files + self.label_file_counts.get(label, 0),
                     )
             self.active_labels.discard(label)
+            self.label_started_at.pop(label, None)
+            self.label_expected_seconds.pop(label, None)
             self._render_bar()
             if (
                 (self.total_files > 0 and self.completed_files >= self.total_files)
@@ -984,6 +1018,8 @@ def cmd_fix(args):
     progress_display = _ScanProgressDisplay(
         debug=settings.scan_debug,
         total_files=len(file_contents),
+        scan_model=settings.llm_model,
+        profile=settings.scan_profile,
     )
     analysis = run_static_analysis_suite(
         repo_path=repo_path,
