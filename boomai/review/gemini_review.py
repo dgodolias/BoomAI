@@ -327,14 +327,18 @@ def _parse_review_response(text: str) -> tuple[ReviewSummary, str]:
         data, _ = decoder.raw_decode(sanitized)
         return _build_summary(data), "full"
     except (json.JSONDecodeError, KeyError, TypeError) as e:
-        logger.warning(f"Failed to parse Gemini response: {e}\nRaw: {text[:500]}")
+        if settings.scan_debug:
+            logger.warning(f"Failed to parse Gemini response: {e}\nRaw: {text[:500]}")
+        else:
+            logger.debug("Failed to parse Gemini response; attempting truncation recovery")
 
     # --- truncation recovery ---
     recovered = _recover_truncated_json(text)
     if recovered:
-        logger.info(
-            f"Recovered {len(recovered['findings'])} finding(s) from truncated Gemini response"
-        )
+        if settings.scan_debug:
+            logger.info(
+                f"Recovered {len(recovered['findings'])} finding(s) from truncated Gemini response"
+            )
         return _build_summary(recovered), "recovered"
 
     logger.error("Gemini response unrecoverable — returning empty review")
@@ -1604,8 +1608,9 @@ async def scan_with_gemini(
                         force_recovered_text=bool(merged),
                     ),
                     findings=merged, critical_count=crit, has_critical=crit > 0,
+                    usage=usage,
                 )
-            return await _attach_fixes_for_chunk(
+            attached = await _attach_fixes_for_chunk(
                 result,
                 repo_file_map=repo_file_map,
                 issue_seeds=issue_seeds,
@@ -1615,6 +1620,8 @@ async def scan_with_gemini(
                 usage=usage,
                 chunk_label=label,
             )
+            _emit(f"{label} completed")
+            return attached
 
         result = await _review_single(chunks[0], "Chunk 1/1")
         result.usage = usage
@@ -1673,8 +1680,9 @@ async def scan_with_gemini(
                 findings=merged_findings,
                 critical_count=merged_crit,
                 has_critical=merged_crit > 0,
+                usage=usage,
             )
-        return await _attach_fixes_for_chunk(
+        attached = await _attach_fixes_for_chunk(
             result,
             repo_file_map=repo_file_map,
             issue_seeds=issue_seeds,
@@ -1684,6 +1692,8 @@ async def scan_with_gemini(
             usage=usage,
             chunk_label=label,
         )
+        _emit(f"{label} completed")
+        return attached
 
     async def _scan_with_sem(
         chunk: list[tuple[str, str]], idx: int,

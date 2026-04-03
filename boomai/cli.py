@@ -11,6 +11,7 @@ import asyncio
 import difflib
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -451,6 +452,144 @@ def _format_elapsed(seconds: float) -> str:
     return f"{s // 60}m {s % 60}s"
 
 
+class _ScanProgressDisplay:
+    """Verbose debug logs or a compact progress bar, depending on scan_debug."""
+
+    def __init__(self, *, debug: bool):
+        self.debug = debug
+        self.total_chunks = 0
+        self.total_weight = 0.0
+        self.completed_weight = 0.0
+        self.completed_labels: set[str] = set()
+        self.active_labels: set[str] = set()
+        self._bar_visible = False
+        self._spinner_frames = "|/-\\"
+        self._spinner_index = 0
+
+    @staticmethod
+    def _normalize_label(raw_label: str) -> str:
+        return raw_label.strip().replace("[", "").replace("]", "")
+
+    def _label_weight(self, label: str) -> float:
+        parts = label.split("/")
+        depth = max(0, len(parts) - 2)
+        return 1.0 / (2 ** depth)
+
+    @staticmethod
+    def _fmt_units(value: float) -> str:
+        if abs(value - round(value)) < 1e-9:
+            return str(int(round(value)))
+        return f"{value:.1f}"
+
+    def _clear_bar(self) -> None:
+        if self.debug:
+            return
+        if self._bar_visible:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            self._bar_visible = False
+
+    def _render_bar(self) -> None:
+        if self.debug or self.total_weight <= 0:
+            return
+        width = 28
+        active_chunks = len(self.active_labels)
+        ratio = self.completed_weight / self.total_weight
+        ratio = min(1.0, ratio)
+        filled = int(round(width * ratio))
+        bar = "#" * filled + "." * (width - filled)
+        percent = int(round(ratio * 100))
+        suffix = (
+            f"({self._fmt_units(self.completed_weight)}/"
+            f"{self._fmt_units(self.total_weight)} done"
+        )
+        if active_chunks:
+            suffix += f", {active_chunks} active"
+        suffix += ")"
+        spinner = ""
+        if active_chunks and self.completed_weight < self.total_weight:
+            spinner = f" {self._spinner_frames[self._spinner_index % len(self._spinner_frames)]}"
+            self._spinner_index += 1
+        sys.stdout.write(
+            f"\r  Scan progress: [{bar}] {percent:3d}% {suffix}{spinner}"
+        )
+        sys.stdout.flush()
+        self._bar_visible = True
+
+    def emit(self, msg: str) -> None:
+        plain = msg.strip()
+        if self.debug:
+            print(f"  {plain}")
+            return
+
+        if plain in {"Planning review chunks...", "Using greedy chunking"}:
+            self._clear_bar()
+            print(f"  {plain}")
+            return
+
+        planned = re.match(r"(\d+) chunk\(s\) planned, model: (.+)", plain)
+        if planned:
+            self._clear_bar()
+            self.total_chunks = int(planned.group(1))
+            self.total_weight = float(self.total_chunks)
+            self.completed_weight = 0.0
+            self.completed_labels.clear()
+            self.active_labels.clear()
+            print(f"  Planned {self.total_chunks} review chunks")
+            return
+
+        if plain.startswith("Reviewing code"):
+            self._clear_bar()
+            print("  Reviewing code...")
+            return
+
+        chunk_start = re.match(r"(\[\d+/\d+\](?:/[A-Za-z0-9_-]+)*)\s+\d+\s+files,\s+[\d,]+\s+chars\.\.\.", plain)
+        if chunk_start:
+            label = self._normalize_label(chunk_start.group(1))
+            self.active_labels.add(label)
+            self._render_bar()
+            return
+
+        split = re.match(r"(\[\d+/\d+\](?:/[A-Za-z0-9_-]+)*)\s+failed .*splitting", plain)
+        if split:
+            label = self._normalize_label(split.group(1))
+            self.active_labels.discard(label)
+            self._render_bar()
+            return
+
+        completed = re.match(r"(\[\d+/\d+\](?:/[A-Za-z0-9_-]+)*)\s+completed$", plain)
+        if completed:
+            label = self._normalize_label(completed.group(1))
+            if label not in self.completed_labels:
+                self.completed_labels.add(label)
+                self.completed_weight = min(self.total_weight, self.completed_weight + self._label_weight(label))
+            self.active_labels.discard(label)
+            self._render_bar()
+            if self.completed_weight >= self.total_weight:
+                self.finish()
+            return
+
+        heartbeat = re.match(r"\[(\d+)/(\d+)\](?:/[A-Za-z0-9_-]+)?\.\.\. \(\d+s\)", plain)
+        if heartbeat:
+            self._render_bar()
+            return
+
+        if "patching " in plain:
+            self._render_bar()
+            return
+
+        if plain.startswith("Done") or "rate limited" in plain.lower():
+            self._clear_bar()
+            print(f"  {plain}")
+            return
+
+    def chunk_done(self, _chunk_review: ReviewSummary) -> None:
+        return
+
+    def finish(self) -> None:
+        self._clear_bar()
+
+
 def print_review(
     review: ReviewSummary,
     applied: int = 0,
@@ -470,6 +609,10 @@ def print_review(
     if show_usage and review.usage and review.usage.api_calls > 0:
         from boomai.review.estimator import format_actual_cost
         print(format_actual_cost(review.usage))
+        print(
+            f"  Stats: {review.usage.api_calls} API calls | "
+            f"{review.usage.prompt_tokens:,} input | {review.usage.completion_tokens:,} output"
+        )
         if len(review.usage.per_model) > 1:
             mixes = ", ".join(
                 f"{model} x{bucket['api_calls']}"
@@ -667,6 +810,7 @@ async def run_local_scan(repo_path: str = ".",
                          include: list[str] | None = None,
                          comments: bool = False,
                          on_chunk_done=None,
+                         on_progress=None,
                          file_contents: list[tuple[str, str]] | None = None,
                          issue_seeds=None,
                          code_index=None,
@@ -724,7 +868,10 @@ async def run_local_scan(repo_path: str = ".",
     print(f"    Model: {settings.llm_model}")
 
     def _progress(msg: str) -> None:
-        print(f"  {msg}")
+        if on_progress:
+            on_progress(msg)
+        else:
+            print(f"  {msg}")
 
     return await scan_with_gemini(
         file_contents=file_contents,
@@ -746,11 +893,11 @@ def cmd_fix(args):
     require_api_key()
     profile = "deep" if getattr(args, "deep", False) else getattr(args, "profile", settings.scan_profile)
     _apply_scan_profile(profile)
-    cost_reporting_enabled = settings.cost_reporting_enabled
+    detailed_cost_report_enabled = settings.cost_reporting_enabled
     if getattr(args, "cost_report", False):
-        cost_reporting_enabled = True
+        detailed_cost_report_enabled = True
     if getattr(args, "clean_run", False):
-        cost_reporting_enabled = False
+        detailed_cost_report_enabled = False
     repo_path = os.path.abspath(".")
 
     # ── Collect files ─────────────────────────────────────
@@ -816,6 +963,7 @@ def cmd_fix(args):
     code_index = build_code_index(file_contents, languages)
     t0 = time.monotonic()
     comments = settings.scan_comments
+    progress_display = _ScanProgressDisplay(debug=settings.scan_debug)
     analysis = run_static_analysis_suite(
         repo_path=repo_path,
         reviewable_files=reviewable,
@@ -826,22 +974,25 @@ def cmd_fix(args):
     try:
         review = asyncio.run(run_local_scan(
             repo_path, comments=comments,
+            on_progress=progress_display.emit,
             file_contents=file_contents,
             issue_seeds=analysis.prioritized_issue_seeds,
             code_index=code_index,
         ))
     except BaseException as exc:
+        progress_display.finish()
         print(f"\n  Fatal scan error: {type(exc).__name__}: {exc}")
         if settings.scan_debug:
             traceback.print_exc()
         return
+    progress_display.finish()
     applied_total = 0
     if review.findings:
         print(f"\n  Applying fixes...")
         applied_total = apply_local(review.findings, repo_path)
     elapsed = time.monotonic() - t0
     cost_report_path = None
-    if cost_reporting_enabled and review.usage and review.usage.api_calls > 0:
+    if detailed_cost_report_enabled and review.usage and review.usage.api_calls > 0:
         record_run(
             features=estimate.features,
             elapsed_seconds=elapsed,
@@ -859,7 +1010,7 @@ def cmd_fix(args):
             issue_seed_count=len(analysis.prioritized_issue_seeds),
             languages=languages,
         )
-    print_review(review, applied=applied_total, elapsed=elapsed, show_usage=cost_reporting_enabled)
+    print_review(review, applied=applied_total, elapsed=elapsed, show_usage=True)
     if cost_report_path is not None:
         print(f"  Cost report: {cost_report_path}")
 
@@ -911,12 +1062,14 @@ def cmd_settings(args):
             masked = "not set"
 
         comments_str = "ON" if settings.scan_comments else "OFF"
+        debug_str = "ON" if settings.scan_debug else "OFF"
         reporting_str = "ON" if settings.cost_reporting_enabled else "OFF"
 
         print(f"\n  BoomAI Settings")
         print(f"  {'=' * 36}")
         print(f"  [1] Gemini API Key      {masked}")
         print(f"  [2] Inline comments     {comments_str}")
+        print(f"  [3] Debug logs          {debug_str}")
         print(f"  [4] Generate detailed cost report  {reporting_str}")
         print()
 
@@ -939,6 +1092,11 @@ def cmd_settings(args):
             _save_setting("BOOMAI_SCAN_COMMENTS", str(new_val).lower())
             settings.scan_comments = new_val
             print(f"  Inline comments: {'ON' if new_val else 'OFF'}")
+        elif choice == "3":
+            new_val = not settings.scan_debug
+            _save_setting("BOOMAI_SCAN_DEBUG", str(new_val).lower())
+            settings.scan_debug = new_val
+            print(f"  Debug logs: {'ON' if new_val else 'OFF'}")
         elif choice == "4":
             new_val = not settings.cost_reporting_enabled
             _save_setting("BOOMAI_COST_REPORTING_ENABLED", str(new_val).lower())
