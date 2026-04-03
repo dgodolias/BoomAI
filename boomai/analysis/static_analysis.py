@@ -342,16 +342,167 @@ def filter_to_changed_files(
     return [f for f in findings if f.file in changed_set]
 
 
+_SEVERITY_ORDER = {
+    Severity.CRITICAL: 0,
+    Severity.HIGH: 1,
+    Severity.MEDIUM: 2,
+    Severity.LOW: 3,
+    Severity.INFO: 4,
+}
+
+_MESSAGE_STOPWORDS = {
+    "the", "and", "for", "with", "from", "this", "that", "will", "into",
+    "inside", "used", "when", "where", "can", "cause", "causes", "could",
+    "should", "while", "through", "without", "before", "after", "inside",
+    "outside", "null", "check", "checks", "missing", "potential",
+}
+
+
+def _rule_family(rule_id: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "-", (rule_id or "").lower()).strip("-")
+    if not normalized:
+        return "unknown"
+    parts = [part for part in normalized.split("-") if part]
+    if not parts:
+        return "unknown"
+    return "-".join(parts[-2:]) if len(parts) >= 2 else parts[0]
+
+
+def _message_key(message: str) -> str:
+    tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", (message or "").lower())
+        if len(token) > 2 and token not in _MESSAGE_STOPWORDS
+    ]
+    if not tokens:
+        return ""
+    return " ".join(tokens[:6])
+
+
+def _finding_sort_key(finding: Finding) -> tuple:
+    return (
+        _SEVERITY_ORDER[finding.severity],
+        finding.file.lower(),
+        finding.line,
+        finding.source.value,
+        _rule_family(finding.rule_id),
+        finding.message.lower(),
+    )
+
+
+def _is_near_duplicate(candidate: Finding, existing: Finding) -> bool:
+    if candidate.file != existing.file:
+        return False
+    if abs(candidate.line - existing.line) > 3:
+        return False
+    same_rule = _rule_family(candidate.rule_id) == _rule_family(existing.rule_id)
+    same_message = (
+        _message_key(candidate.message)
+        and _message_key(candidate.message) == _message_key(existing.message)
+    )
+    return same_rule or same_message
+
+
+def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
+    deduped: list[Finding] = []
+    for finding in sorted(findings, key=_finding_sort_key):
+        if any(_is_near_duplicate(finding, existing) for existing in deduped):
+            continue
+        deduped.append(finding)
+    return deduped
+
+
+def _select_diverse(
+    findings: list[Finding],
+    *,
+    max_count: int,
+    max_per_file: int,
+    max_per_rule: int,
+    selected: list[Finding] | None = None,
+) -> list[Finding]:
+    selected = list(selected or [])
+    file_counts: dict[str, int] = {}
+    rule_counts: dict[tuple[str, str], int] = {}
+
+    for finding in selected:
+        file_counts[finding.file] = file_counts.get(finding.file, 0) + 1
+        rule_key = (finding.source.value, _rule_family(finding.rule_id))
+        rule_counts[rule_key] = rule_counts.get(rule_key, 0) + 1
+
+    remaining = [finding for finding in findings if finding not in selected]
+
+    while remaining and len(selected) < max_count:
+        eligible = []
+        for finding in remaining:
+            rule_key = (finding.source.value, _rule_family(finding.rule_id))
+            if file_counts.get(finding.file, 0) >= max_per_file:
+                continue
+            if rule_counts.get(rule_key, 0) >= max_per_rule:
+                continue
+            eligible.append(finding)
+
+        if not eligible:
+            break
+
+        best = min(
+            eligible,
+            key=lambda finding: (
+                _SEVERITY_ORDER[finding.severity],
+                file_counts.get(finding.file, 0),
+                rule_counts.get((finding.source.value, _rule_family(finding.rule_id)), 0),
+                finding.line,
+                finding.file.lower(),
+                finding.source.value,
+                _rule_family(finding.rule_id),
+            ),
+        )
+
+        selected.append(best)
+        file_counts[best.file] = file_counts.get(best.file, 0) + 1
+        best_rule_key = (best.source.value, _rule_family(best.rule_id))
+        rule_counts[best_rule_key] = rule_counts.get(best_rule_key, 0) + 1
+        remaining.remove(best)
+
+    return selected
+
+
 def prioritize_findings(
     findings: list[Finding], max_count: int = 20
 ) -> list[Finding]:
-    """Sort by severity and return top N findings."""
-    severity_order = {
-        Severity.CRITICAL: 0,
-        Severity.HIGH: 1,
-        Severity.MEDIUM: 2,
-        Severity.LOW: 3,
-        Severity.INFO: 4,
-    }
-    sorted_findings = sorted(findings, key=lambda f: severity_order[f.severity])
-    return sorted_findings[:max_count]
+    """Return deduped, severity-aware findings with file/rule diversity."""
+    deduped = _dedupe_findings(findings)
+    if len(deduped) <= max_count:
+        return sorted(deduped, key=_finding_sort_key)
+
+    sorted_findings = sorted(deduped, key=_finding_sort_key)
+
+    # First pass keeps good spread across files/rule families.
+    selected = _select_diverse(
+        sorted_findings,
+        max_count=max_count,
+        max_per_file=2,
+        max_per_rule=3,
+    )
+
+    # Second pass relaxes quotas so we do not throw away important findings.
+    if len(selected) < max_count:
+        selected = _select_diverse(
+            sorted_findings,
+            max_count=max_count,
+            max_per_file=4,
+            max_per_rule=6,
+            selected=selected,
+        )
+
+    # Final fill from remaining severity-sorted findings, if any slots remain.
+    if len(selected) < max_count:
+        selected_set = set(id(finding) for finding in selected)
+        for finding in sorted_findings:
+            if id(finding) in selected_set:
+                continue
+            selected.append(finding)
+            selected_set.add(id(finding))
+            if len(selected) >= max_count:
+                break
+
+    return selected[:max_count]

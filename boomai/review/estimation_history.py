@@ -11,8 +11,9 @@ from ..core.models import UsageStats
 
 # Bump when the scan/patch architecture changes enough that historical
 # calibration data becomes misleading for current estimates.
-HISTORY_VERSION = 2
-MIN_SAMPLES = 8
+HISTORY_VERSION = 3
+MIN_SAMPLES = 3
+REGRESSION_MIN_SAMPLES = 12
 Z_95 = 1.96
 
 
@@ -191,6 +192,97 @@ def _prediction_interval(
     return max(floor, predicted - margin), predicted + margin
 
 
+def _clamp_ratio(value: float, *, low: float = 0.2, high: float = 3.0) -> float:
+    return max(low, min(high, value))
+
+
+def _similarity_weight(current: EstimateFeatures, historical: EstimateFeatures) -> float:
+    total_chars_ratio = min(current.total_chars, historical.total_chars) / max(
+        1, max(current.total_chars, historical.total_chars)
+    )
+    file_ratio = min(current.file_count, historical.file_count) / max(
+        1, max(current.file_count, historical.file_count)
+    )
+    chunk_ratio = min(current.chunk_count, historical.chunk_count) / max(
+        1, max(current.chunk_count, historical.chunk_count)
+    )
+
+    weight = 1.0
+    if current.scan_profile_deep == historical.scan_profile_deep:
+        weight += 1.0
+    if current.scan_model_flash == historical.scan_model_flash:
+        weight += 0.35
+    if current.patch_model_flash == historical.patch_model_flash:
+        weight += 0.15
+    weight += total_chars_ratio * 0.9
+    weight += file_ratio * 0.35
+    weight += chunk_ratio * 0.25
+    return weight
+
+
+def _weighted_mean(values: list[float], weights: list[float]) -> float:
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return sum(values) / max(1, len(values))
+    return sum(v * w for v, w in zip(values, weights)) / total_weight
+
+
+def _weighted_std(values: list[float], weights: list[float], mean: float) -> float:
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return 0.0
+    variance = sum(w * ((v - mean) ** 2) for v, w in zip(values, weights)) / total_weight
+    return math.sqrt(max(0.0, variance))
+
+
+def _blend_weight(sample_count: int) -> float:
+    # Start learning early, but keep heuristics in the loop until we have a
+    # healthier sample size.
+    return max(0.0, min(0.8, sample_count / 5.0))
+
+
+def _ratio_adjustment(
+    rows: list[tuple[EstimateFeatures, float, float]],
+    current: EstimateFeatures,
+) -> LearnedEstimate | None:
+    if len(rows) < MIN_SAMPLES:
+        return None
+
+    weights: list[float] = []
+    cost_ratios: list[float] = []
+    time_ratios: list[float] = []
+
+    for historical, actual_cost, actual_time in rows:
+        weights.append(_similarity_weight(current, historical))
+        cost_ratios.append(
+            _clamp_ratio(actual_cost / max(0.01, historical.base_cost_mid), low=0.15, high=2.5)
+        )
+        time_ratios.append(
+            _clamp_ratio(actual_time / max(5.0, historical.base_time_mid), low=0.2, high=3.0)
+        )
+
+    cost_ratio_mean = _weighted_mean(cost_ratios, weights)
+    time_ratio_mean = _weighted_mean(time_ratios, weights)
+    cost_ratio_std = _weighted_std(cost_ratios, weights, cost_ratio_mean)
+    time_ratio_std = _weighted_std(time_ratios, weights, time_ratio_mean)
+    weight = _blend_weight(len(rows))
+
+    cost_center = current.base_cost_mid * ((1.0 - weight) + (weight * cost_ratio_mean))
+    time_center = current.base_time_mid * ((1.0 - weight) + (weight * time_ratio_mean))
+
+    cost_margin_ratio = max(0.14, ((1.0 - weight) * 0.35) + (weight * max(0.10, cost_ratio_std * 1.25)))
+    time_margin_ratio = max(0.18, ((1.0 - weight) * 0.45) + (weight * max(0.12, time_ratio_std * 1.25)))
+
+    return LearnedEstimate(
+        cost_min=max(0.01, cost_center * (1.0 - cost_margin_ratio)),
+        cost_max=cost_center * (1.0 + cost_margin_ratio),
+        time_min=max(5.0, time_center * (1.0 - time_margin_ratio)),
+        time_max=time_center * (1.0 + time_margin_ratio),
+        samples=len(rows),
+        blended=True,
+    )
+
+
 def _calc_actual_cost(usage: UsageStats, get_pricing) -> float:
     if getattr(usage, "request_events", None):
         total = 0.0
@@ -248,6 +340,7 @@ def learn_adjustment(features: EstimateFeatures) -> LearnedEstimate | None:
     xs = []
     ys_cost = []
     ys_time = []
+    rows: list[tuple[EstimateFeatures, float, float]] = []
     for record in records:
         feat = record.get("features")
         actual = record.get("actual")
@@ -262,14 +355,18 @@ def learn_adjustment(features: EstimateFeatures) -> LearnedEstimate | None:
         xs.append(_feature_vector(feature_obj))
         ys_cost.append(actual_cost)
         ys_time.append(actual_time)
+        rows.append((feature_obj, actual_cost, actual_time))
 
     if len(xs) < MIN_SAMPLES:
         return None
 
+    if len(xs) < REGRESSION_MIN_SAMPLES:
+        return _ratio_adjustment(rows, features)
+
     cost_fit = _fit_ols(xs, ys_cost)
     time_fit = _fit_ols(xs, ys_time)
     if cost_fit is None or time_fit is None:
-        return None
+        return _ratio_adjustment(rows, features)
 
     coeffs_cost, cost_inv = cost_fit
     coeffs_time, time_inv = time_fit

@@ -158,6 +158,7 @@ class ScanEstimate:
     time_max: float
     features: EstimateFeatures
     learned_samples: int = 0
+    learned_blended: bool = False
 
 
 def estimate_scan(
@@ -285,12 +286,14 @@ def estimate_scan(
     )
     learned = learn_adjustment(features)
     learned_samples = 0
+    learned_blended = False
     if learned is not None:
         cost_min = learned.cost_min
         cost_max = learned.cost_max
         time_min = learned.time_min
         time_max = learned.time_max
         learned_samples = learned.samples
+        learned_blended = learned.blended
 
     return ScanEstimate(
         profile=profile,
@@ -314,6 +317,7 @@ def estimate_scan(
         time_max=time_max,
         features=features,
         learned_samples=learned_samples,
+        learned_blended=learned_blended,
     )
 
 
@@ -571,7 +575,8 @@ def format_estimate(est: ScanEstimate) -> None:
     print(f"    Est. cost:   {_fmt_cost(est.cost_min)} -- {_fmt_cost(est.cost_max)}")
     print(f"    Est. time:   ~{_fmt_time(est.time_min)} -- {_fmt_time(est.time_max)}")
     if est.learned_samples:
-        print(f"    Learned:     calibrated from {est.learned_samples} past run(s)")
+        learned_label = "lightly calibrated" if getattr(est, "learned_blended", False) else "calibrated"
+        print(f"    Learned:     {learned_label} from {est.learned_samples} past run(s)")
     if not est.is_known_model:
         print("    Warning:     Unknown model -- using conservative estimate")
     print(f"  {sep}\n")
