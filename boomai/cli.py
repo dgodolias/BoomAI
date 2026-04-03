@@ -344,11 +344,11 @@ def _line_match(content: str, old_code: str, hint_line: int) -> tuple[int, int] 
     max_start = len(content_lines) - n
     if max_start < 0:
         return None
-    search_start = max(0, hint_line - 1 - 25)
-    search_end = min(max_start, hint_line - 1 + 25)
+    search_start = min(max_start, max(0, hint_line - 1 - 25))
+    search_end = max(search_start, min(max_start, hint_line - 1 + 25))
     best_score = 0.0
     old_joined = "\n".join(old_fully_stripped)
-    for i in range(search_start, max(search_start, search_end) + 1):
+    for i in range(search_start, search_end + 1):
         window = [content_lines[i + j].strip() for j in range(n)]
         score = difflib.SequenceMatcher(None, old_joined, "\n".join(window)).ratio()
         if score > best_score:
@@ -358,7 +358,7 @@ def _line_match(content: str, old_code: str, hint_line: int) -> tuple[int, int] 
     if best is not None and best_score >= 0.94:
         return best
 
-    return best
+    return None
 
 
 def _find_and_replace(content: str, old_code: str, new_code: str,
@@ -455,13 +455,16 @@ def _format_elapsed(seconds: float) -> str:
 class _ScanProgressDisplay:
     """Verbose debug logs or a compact progress bar, depending on scan_debug."""
 
-    def __init__(self, *, debug: bool):
+    def __init__(self, *, debug: bool, total_files: int = 0):
         self.debug = debug
+        self.total_files = max(0, int(total_files))
         self.total_chunks = 0
         self.total_weight = 0.0
         self.completed_weight = 0.0
+        self.completed_files = 0
         self.completed_labels: set[str] = set()
         self.active_labels: set[str] = set()
+        self.label_file_counts: dict[str, int] = {}
         self._bar_visible = False
         self._spinner_frames = "|/-\\"
         self._spinner_index = 0
@@ -490,21 +493,31 @@ class _ScanProgressDisplay:
             self._bar_visible = False
 
     def _render_bar(self) -> None:
-        if self.debug or self.total_weight <= 0:
+        if self.debug:
             return
+        if self.total_files > 0:
+            total_units = float(self.total_files)
+            completed_units = float(self.completed_files)
+            suffix = f" ({self.completed_files}/{self.total_files} files)"
+        else:
+            if self.total_weight <= 0:
+                return
+            total_units = self.total_weight
+            completed_units = self.completed_weight
+            suffix = ""
         width = 28
         active_chunks = len(self.active_labels)
-        ratio = self.completed_weight / self.total_weight
+        ratio = completed_units / total_units
         ratio = min(1.0, ratio)
         filled = int(round(width * ratio))
         bar = "#" * filled + "." * (width - filled)
         percent = int(round(ratio * 100))
         spinner = ""
-        if active_chunks and self.completed_weight < self.total_weight:
+        if active_chunks and completed_units < total_units:
             spinner = f" {self._spinner_frames[self._spinner_index % len(self._spinner_frames)]}"
             self._spinner_index += 1
         sys.stdout.write(
-            f"\r  Scan progress: [{bar}] {percent:3d}%{spinner}"
+            f"\r  Scan progress: [{bar}] {percent:3d}%{suffix}{spinner}"
         )
         sys.stdout.flush()
         self._bar_visible = True
@@ -526,8 +539,10 @@ class _ScanProgressDisplay:
             self.total_chunks = int(planned.group(1))
             self.total_weight = float(self.total_chunks)
             self.completed_weight = 0.0
+            self.completed_files = 0
             self.completed_labels.clear()
             self.active_labels.clear()
+            self.label_file_counts.clear()
             print(f"  Planned {self.total_chunks} review chunks")
             return
 
@@ -536,10 +551,12 @@ class _ScanProgressDisplay:
             print("  Reviewing code...")
             return
 
-        chunk_start = re.match(r"(\[\d+/\d+\](?:/[A-Za-z0-9_-]+)*)\s+\d+\s+files,\s+[\d,]+\s+chars\.\.\.", plain)
+        chunk_start = re.match(r"(\[\d+/\d+\](?:/[A-Za-z0-9_-]+)*)\s+(\d+)\s+files,\s+[\d,]+\s+chars\.\.\.", plain)
         if chunk_start:
             label = self._normalize_label(chunk_start.group(1))
+            file_count = int(chunk_start.group(2))
             self.active_labels.add(label)
+            self.label_file_counts[label] = file_count
             self._render_bar()
             return
 
@@ -556,9 +573,17 @@ class _ScanProgressDisplay:
             if label not in self.completed_labels:
                 self.completed_labels.add(label)
                 self.completed_weight = min(self.total_weight, self.completed_weight + self._label_weight(label))
+                if self.total_files > 0:
+                    self.completed_files = min(
+                        self.total_files,
+                        self.completed_files + self.label_file_counts.get(label, 0),
+                    )
             self.active_labels.discard(label)
             self._render_bar()
-            if self.completed_weight >= self.total_weight:
+            if (
+                (self.total_files > 0 and self.completed_files >= self.total_files)
+                or (self.total_files <= 0 and self.completed_weight >= self.total_weight)
+            ):
                 self.finish()
             return
 
@@ -956,7 +981,10 @@ def cmd_fix(args):
     code_index = build_code_index(file_contents, languages)
     t0 = time.monotonic()
     comments = settings.scan_comments
-    progress_display = _ScanProgressDisplay(debug=settings.scan_debug)
+    progress_display = _ScanProgressDisplay(
+        debug=settings.scan_debug,
+        total_files=len(file_contents),
+    )
     analysis = run_static_analysis_suite(
         repo_path=repo_path,
         reviewable_files=reviewable,

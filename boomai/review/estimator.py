@@ -14,11 +14,8 @@ from ..core.config import settings
 from .estimation_history import EstimateFeatures, learn_adjustment
 
 CHARS_PER_TOKEN = 3.7
-SCAN_OUTPUT_RATIO_LOW = 0.01
-SCAN_OUTPUT_RATIO_HIGH = 0.12
-PATCH_OUTPUT_RATIO_LOW = 0.15
-PATCH_OUTPUT_RATIO_HIGH = 0.45
-PLAN_OUTPUT_RATIO = 0.20
+PATCH_OUTPUT_RATIO_LOW = 0.05
+PATCH_OUTPUT_RATIO_HIGH = 0.18
 
 _PLAN_TIME_S = 15.0
 _PRO_TIME_PER_CALL_S = 120.0
@@ -82,6 +79,62 @@ def get_pricing(model_id: str) -> tuple[ModelPricing, bool]:
     return _UNKNOWN, False
 
 
+def _estimate_plan_billed_output_tokens(plan_output_tokens: int, chunk_count: int) -> tuple[int, int]:
+    low = min(plan_output_tokens, max(256, 220 + chunk_count * 60))
+    high = min(plan_output_tokens, max(low, 420 + chunk_count * 120))
+    return low, high
+
+
+def _estimate_scan_billed_output_tokens(
+    model_name: str,
+    output_cap: int,
+    *,
+    chunk_chars: int,
+    file_count: int,
+    issue_seed_count: int,
+) -> tuple[int, int]:
+    lowered = model_name.lower()
+    is_gemini3 = "gemini-3" in lowered or "gemini-3.1" in lowered
+    is_flash = "flash" in lowered
+    is_pro = "pro" in lowered and not is_flash
+
+    if is_gemini3 and is_pro:
+        if output_cap <= 8192 or chunk_chars <= 10_000 or file_count <= 5:
+            low_ratio, high_ratio = 0.55, 0.98
+        elif chunk_chars <= 40_000 or file_count <= 10:
+            low_ratio, high_ratio = 0.40, 0.85
+        else:
+            low_ratio, high_ratio = 0.30, 0.75
+    elif is_gemini3 and is_flash:
+        low_ratio, high_ratio = 0.08, 0.28
+    elif is_flash:
+        low_ratio, high_ratio = 0.06, 0.22
+    else:
+        low_ratio, high_ratio = 0.12, 0.40
+
+    if issue_seed_count >= 4:
+        low_ratio = min(0.98, low_ratio + 0.05)
+        high_ratio = min(0.99, high_ratio + 0.05)
+
+    low = int(output_cap * low_ratio)
+    high = int(output_cap * high_ratio)
+    return max(1, low), max(max(1, low), high)
+
+
+def _estimate_patch_output_tokens(model_name: str, output_cap: int, patch_calls: int, ratio: float) -> int:
+    lowered = model_name.lower()
+    if "gemini-3" in lowered or "gemini-3.1" in lowered:
+        if "flash" in lowered:
+            effective_ratio = ratio
+        else:
+            effective_ratio = max(ratio, 0.10)
+    elif "flash" in lowered:
+        effective_ratio = max(ratio, 0.06)
+    else:
+        effective_ratio = max(ratio, 0.10)
+    return int(patch_calls * output_cap * effective_ratio)
+
+
 @dataclass
 class ScanEstimate:
     profile: str
@@ -119,7 +172,13 @@ def estimate_scan(
     languages: list[str] | None = None,
 ) -> ScanEstimate:
     """Estimate cost and time for the full two-stage scan."""
-    from boomai.review.gemini_review import _chunk_files, _compute_scan_output_tokens
+    from boomai.review.gemini_review import (
+        _chunk_files,
+        _compute_patch_concurrency,
+        _compute_scan_concurrency,
+        _compute_scan_output_tokens,
+        _normalize_scan_output_tokens,
+    )
     from boomai.review.prompts import (
         build_fix_system_prompt,
         build_plan_prompt,
@@ -137,14 +196,21 @@ def estimate_scan(
 
     plan_input = int(plan_system_chars / CHARS_PER_TOKEN)
     scan_input = 0
-    scan_output_low = int(plan_output_tokens * PLAN_OUTPUT_RATIO)
-    scan_output_high = int(plan_output_tokens * PLAN_OUTPUT_RATIO)
+    scan_output_low, scan_output_high = _estimate_plan_billed_output_tokens(plan_output_tokens, chunk_count)
     for chunk in chunks:
         chunk_chars = sum(len(c) for _, c in chunk)
         scan_input += int((scan_system_chars + chunk_chars + 300) / CHARS_PER_TOKEN)
-        chunk_cap = _compute_scan_output_tokens(chunk_chars, len(chunk))
-        scan_output_low += int(chunk_cap * SCAN_OUTPUT_RATIO_LOW)
-        scan_output_high += int(chunk_cap * SCAN_OUTPUT_RATIO_HIGH)
+        requested_chunk_cap = _compute_scan_output_tokens(chunk_chars, len(chunk))
+        chunk_cap = _normalize_scan_output_tokens(model, requested_chunk_cap)
+        billed_low, billed_high = _estimate_scan_billed_output_tokens(
+            model,
+            chunk_cap,
+            chunk_chars=chunk_chars,
+            file_count=len(chunk),
+            issue_seed_count=0,
+        )
+        scan_output_low += billed_low
+        scan_output_high += billed_high
 
     base_patch_calls_low = max(chunk_count, math.ceil(total_chars / 75_000))
     base_patch_calls_high = max(base_patch_calls_low, math.ceil(total_chars / 25_000))
@@ -160,8 +226,18 @@ def estimate_scan(
     patch_input_low = int((patch_calls_low * patch_prompt_chars_low) / CHARS_PER_TOKEN)
     patch_input_high = int((patch_calls_high * patch_prompt_chars_high) / CHARS_PER_TOKEN)
     patch_output_cap = min(scan_output_tokens, 4096)
-    patch_output_low = int(patch_calls_low * patch_output_cap * PATCH_OUTPUT_RATIO_LOW)
-    patch_output_high = int(patch_calls_high * patch_output_cap * PATCH_OUTPUT_RATIO_HIGH)
+    patch_output_low = _estimate_patch_output_tokens(
+        patch_model,
+        patch_output_cap,
+        patch_calls_low,
+        PATCH_OUTPUT_RATIO_LOW,
+    )
+    patch_output_high = _estimate_patch_output_tokens(
+        patch_model,
+        patch_output_cap,
+        patch_calls_high,
+        PATCH_OUTPUT_RATIO_HIGH,
+    )
 
     total_input_low = plan_input + scan_input + patch_input_low
     total_input_high = plan_input + scan_input + patch_input_high
@@ -185,8 +261,8 @@ def estimate_scan(
 
     scan_per_call = _FLASH_TIME_PER_CALL_S if "flash" in model.lower() else _PRO_TIME_PER_CALL_S
     patch_per_call = _FLASH_PATCH_TIME_PER_CALL_S if "flash" in patch_model.lower() else _PRO_PATCH_TIME_PER_CALL_S
-    scan_concurrency = 2 if chunk_count > 20 else 3
-    patch_concurrency = 3
+    scan_concurrency = _compute_scan_concurrency(model, chunk_count)
+    patch_concurrency = _compute_patch_concurrency(patch_model, patch_calls_high)
     scan_batches = math.ceil(chunk_count / scan_concurrency)
     patch_batches_low = math.ceil(patch_calls_low / patch_concurrency)
     patch_batches_high = math.ceil(patch_calls_high / patch_concurrency)

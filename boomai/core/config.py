@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     scan_timeout: float = 180.0
     scan_debug: bool = False
     scan_comments: bool = False
+    scan_pro_min_output_tokens: int = 8192
     scan_chunk_reserved_chars: int = 65000
     scan_max_files_per_chunk: int = 18
     patch_timeout: float = 45.0
@@ -42,6 +43,8 @@ class Settings(BaseSettings):
     deep_patch_max_findings_per_chunk: int = 8
     deep_prompt_pack_scan_max_extras: int = 4
     deep_prompt_pack_fix_max_extras: int = 3
+    gemini3_pro_thinking_level: str = "low"
+    gemini3_flash_thinking_level: str = "minimal"
 
     # Scan planning (repo-map phase)
     plan_output_tokens: int = 65536

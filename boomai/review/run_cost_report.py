@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,65 @@ def _estimate_payload(estimate: ScanEstimate) -> dict[str, object]:
         "time_max_seconds": estimate.time_max,
         "learned_samples": estimate.learned_samples,
         "features": asdict(estimate.features),
+    }
+
+
+def _scan_diagnostics_payload(request_events: list[dict[str, object]]) -> dict[str, object]:
+    scan_events = [
+        event for event in request_events
+        if isinstance(event, dict) and str(event.get("stage", "")) == "scan"
+    ]
+    parse_status_counts: Counter[str] = Counter()
+    finish_reason_counts: Counter[str] = Counter()
+    suspicious_requests: list[dict[str, object]] = []
+
+    for event in scan_events:
+        extra = event.get("extra")
+        if not isinstance(extra, dict):
+            extra = {}
+        parse_status = str(extra.get("parse_status", "") or "")
+        finish_reason = str(extra.get("candidate_finish_reason", "") or "")
+        finish_message = str(extra.get("candidate_finish_message", "") or "")
+        if parse_status:
+            parse_status_counts[parse_status] += 1
+        if finish_reason:
+            finish_reason_counts[finish_reason] += 1
+
+        suspicious = (
+            parse_status in {"failed", "recovered"}
+            or finish_reason not in {"", "STOP"}
+        )
+        if not suspicious:
+            continue
+
+        suspicious_requests.append(
+            {
+                "request_label": str(event.get("request_label", "") or ""),
+                "model": str(event.get("model", "") or ""),
+                "parse_status": parse_status or "unknown",
+                "finish_reason": finish_reason or "",
+                "finish_message": finish_message or "",
+                "prompt_tokens": int(event.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(event.get("completion_tokens", 0) or 0),
+                "chunk_chars": int(extra.get("chunk_chars", 0) or 0),
+                "chunk_file_count": int(extra.get("chunk_file_count", 0) or 0),
+                "user_message_chars": int(extra.get("user_message_chars", 0) or 0),
+                "requested_output_tokens": int(extra.get("requested_output_tokens", 0) or 0),
+                "system_prompt_chars": int(extra.get("system_prompt_chars", 0) or 0),
+                "max_output_tokens": int(extra.get("max_output_tokens", 0) or 0),
+                "thinking_config": extra.get("thinking_config"),
+                "candidate_text_chars": int(extra.get("candidate_text_chars", 0) or 0),
+                "recovered_findings_count": int(extra.get("recovered_findings_count", 0) or 0),
+                "degraded_mode": bool(extra.get("degraded_mode", False)),
+                "parse_retries_remaining": int(extra.get("parse_retries_remaining", 0) or 0),
+            }
+        )
+
+    return {
+        "scan_request_count": len(scan_events),
+        "parse_status_counts": dict(parse_status_counts),
+        "finish_reason_counts": dict(finish_reason_counts),
+        "suspicious_scan_requests": suspicious_requests,
     }
 
 
@@ -89,6 +149,7 @@ def write_run_cost_report(
                 "request_events": usage.request_events,
             },
             "cost_breakdown": cost_breakdown,
+            "diagnostics": _scan_diagnostics_payload(usage.request_events),
         },
         "pricing_notes": {
             "display_cost_is_multiplied": cost_breakdown.get("display_multiplier", 1.0) != 1.0,

@@ -211,6 +211,28 @@ def _compute_patch_concurrency(model_name: str, patch_count: int) -> int:
     return max(1, limit)
 
 
+def _is_gemini3_family(model_name: str) -> bool:
+    lowered = model_name.lower()
+    return "gemini-3" in lowered or "gemini-3.1" in lowered
+
+
+def _is_flash_model(model_name: str) -> bool:
+    return "flash" in model_name.lower()
+
+
+def _is_pro_model(model_name: str) -> bool:
+    lowered = model_name.lower()
+    return "pro" in lowered and "flash" not in lowered
+
+
+def _normalize_scan_output_tokens(model_name: str, requested_output_tokens: int) -> int:
+    """Leave enough output headroom for Gemini 3 Pro structured JSON."""
+    effective = max(1, int(requested_output_tokens))
+    if _is_gemini3_family(model_name) and _is_pro_model(model_name):
+        effective = max(effective, settings.scan_pro_min_output_tokens)
+    return min(settings.scan_output_tokens, effective)
+
+
 def _build_generation_config(
     model_name: str,
     max_output_tokens: int,
@@ -226,7 +248,12 @@ def _build_generation_config(
         config["responseJsonSchema"] = response_json_schema
 
     lowered = model_name.lower()
-    if "flash" in lowered:
+    if _is_gemini3_family(model_name):
+        if _is_flash_model(model_name):
+            config["thinkingConfig"] = {"thinkingLevel": settings.gemini3_flash_thinking_level}
+        elif _is_pro_model(model_name):
+            config["thinkingConfig"] = {"thinkingLevel": settings.gemini3_pro_thinking_level}
+    elif "flash" in lowered:
         config["thinkingConfig"] = {"thinkingBudget": 0}
 
     return config
@@ -1304,13 +1331,21 @@ async def _scan_chunk(
         related_snippets=related_snippets,
     )
     chunk_chars = sum(len(content) for _, content in file_contents)
-    output_tokens = _compute_scan_output_tokens(
+    requested_output_tokens = _compute_scan_output_tokens(
         chunk_chars,
         len(file_contents),
         len(chunk_issue_seeds),
     )
     if output_tokens_override is not None:
-        output_tokens = min(output_tokens, output_tokens_override)
+        requested_output_tokens = output_tokens_override
+
+    model_name = model_chain.current if model_chain else settings.llm_model
+    output_tokens = _normalize_scan_output_tokens(model_name, requested_output_tokens)
+    generation_config = _build_generation_config(
+        model_name,
+        output_tokens,
+        response_json_schema=build_scan_response_schema(),
+    )
 
     if settings.scan_debug and on_progress:
         on_progress(
@@ -1318,8 +1353,9 @@ async def _scan_chunk(
             f"system={len(system_prompt):,}, user={len(user_message):,}, "
             f"chunk={chunk_chars:,}, files={len(file_contents)}, "
             f"issue_seeds={len(chunk_issue_seeds)}, snippets={len(related_snippets)}, "
-            f"packs={','.join(selected_pack_ids)}, max_output_tokens={output_tokens:,}, "
-            f"model={model_chain.current if model_chain else settings.llm_model}"
+            f"packs={','.join(selected_pack_ids)}, requested_output_tokens={requested_output_tokens:,}, "
+            f"effective_output_tokens={output_tokens:,}, "
+            f"model={model_name}"
         )
 
     url = model_chain.build_url() if model_chain else (
@@ -1340,11 +1376,7 @@ async def _scan_chunk(
                 _gemini_post(url, {
                     "system_instruction": {"parts": [{"text": system_prompt}]},
                     "contents": [{"role": "user", "parts": [{"text": user_message}]}],
-                    "generationConfig": _build_generation_config(
-                        model_chain.current if model_chain else settings.llm_model,
-                        output_tokens,
-                        response_json_schema=build_scan_response_schema(),
-                    ),
+                    "generationConfig": generation_config,
                 }, timeout=effective_timeout, on_retry=_on_retry),
                 timeout=effective_timeout,
             ),
@@ -1386,7 +1418,7 @@ async def _scan_chunk(
     if usage:
         usage.add(
             result,
-            model_chain.current if model_chain else settings.llm_model,
+            model_name,
             stage="scan",
             request_label=chunk_info,
             extra={
@@ -1397,7 +1429,9 @@ async def _scan_chunk(
                 "selected_pack_ids": selected_pack_ids,
                 "system_prompt_chars": len(system_prompt),
                 "user_message_chars": len(user_message),
+                "requested_output_tokens": requested_output_tokens,
                 "max_output_tokens": output_tokens,
+                "thinking_config": generation_config.get("thinkingConfig"),
                 "degraded_mode": degraded_mode,
                 "parse_retries_remaining": parse_retries_remaining,
             },
@@ -1416,8 +1450,30 @@ async def _scan_chunk(
         logger.error(f"Malformed candidate: {json.dumps(candidate)[:500]}")
         return _fallback_review()
 
+    finish_reason = str(candidate.get("finishReason", "") or "")
+    finish_message = str(candidate.get("finishMessage", "") or "")
     text = candidate["content"]["parts"][0]["text"]
     parsed, parse_status = _parse_review_response(text)
+    if usage:
+        usage.annotate_last_event(
+            stage="scan",
+            request_label=chunk_info,
+            extra={
+                "candidate_finish_reason": finish_reason,
+                "candidate_finish_message": finish_message,
+                "parse_status": parse_status,
+                "candidate_text_chars": len(text),
+                "recovered_findings_count": len(parsed.findings) if parse_status == "recovered" else 0,
+            },
+        )
+    if settings.scan_debug and parse_status in {"failed", "recovered"} and on_progress:
+        reason_bits = []
+        if finish_reason:
+            reason_bits.append(f"finishReason={finish_reason}")
+        if finish_message:
+            reason_bits.append(f"finishMessage={finish_message}")
+        if reason_bits:
+            on_progress(f"  {chunk_info} - candidate stopped with {'; '.join(reason_bits)}")
     if parse_status in {"failed", "recovered"} and parse_retries_remaining > 0:
         should_split_large_chunk = (
             len(file_contents) > 4
@@ -1515,6 +1571,36 @@ async def _scan_chunk(
                 reason = "partial JSON recovered" if parse_status == "recovered" else "malformed JSON response"
                 on_progress(f"  {chunk_info} - {reason}, returning split signal for large chunk")
             return _split_required_review()
+        if (
+            finish_reason == "MAX_TOKENS"
+            and _is_gemini3_family(model_name)
+            and _is_pro_model(model_name)
+        ):
+            retry_output_tokens = min(
+                settings.scan_output_tokens,
+                max(output_tokens * 2, settings.scan_pro_min_output_tokens),
+            )
+            if retry_output_tokens > output_tokens:
+                if on_progress:
+                    on_progress(
+                        f"  {chunk_info} - hit MAX_TOKENS, retrying once with higher output cap "
+                        f"({retry_output_tokens:,})"
+                    )
+                return await _scan_chunk(
+                    file_contents, detected_languages, chunk_info,
+                    comments=comments,
+                    on_progress=on_progress, model_chain=model_chain,
+                    usage=usage,
+                    repo_file_map=repo_file_map,
+                    issue_seeds=issue_seeds,
+                    code_index=code_index,
+                    parse_retries_remaining=parse_retries_remaining - 1,
+                    max_snippets_override=max_snippets_override,
+                    max_snippet_chars_override=max_snippet_chars_override,
+                    issue_seed_limit=issue_seed_limit,
+                    output_tokens_override=retry_output_tokens,
+                    degraded_mode=degraded_mode,
+                )
         retry_note = ""
         if model_chain:
             failed_model = model_chain.current

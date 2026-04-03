@@ -141,6 +141,28 @@ class UsageStats:
             event["extra"] = extra
         self.request_events.append(event)
 
+    def annotate_last_event(
+        self,
+        *,
+        stage: str | None = None,
+        request_label: str | None = None,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        """Merge additional metadata into the most recent matching request event."""
+        if not extra:
+            return
+        for event in reversed(self.request_events):
+            if stage is not None and event.get("stage") != stage:
+                continue
+            if request_label is not None and event.get("request_label") != request_label:
+                continue
+            existing = event.get("extra")
+            if not isinstance(existing, dict):
+                existing = {}
+                event["extra"] = existing
+            existing.update(extra)
+            return
+
 
 class ReviewSummary(BaseModel):
     summary: str
