@@ -9,7 +9,9 @@ from pathlib import Path
 
 from ..core.models import UsageStats
 
-HISTORY_VERSION = 1
+# Bump when the scan/patch architecture changes enough that historical
+# calibration data becomes misleading for current estimates.
+HISTORY_VERSION = 2
 MIN_SAMPLES = 8
 Z_95 = 1.96
 
