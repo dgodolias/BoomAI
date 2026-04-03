@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from ..core.config import settings
+from ..core.google_pricing import get_pricing_catalog_metadata
 from .estimator import ScanEstimate, compute_usage_cost_breakdown
 
 
@@ -126,6 +127,7 @@ def write_run_cost_report(
     report_path = report_dir / f"{_safe_name(run_id)}-cost-report.json"
 
     cost_breakdown = compute_usage_cost_breakdown(usage)
+    pricing_catalog = get_pricing_catalog_metadata()
     payload = {
         "schema_version": 2,
         "run_id": run_id,
@@ -166,6 +168,10 @@ def write_run_cost_report(
             "diagnostics": _scan_diagnostics_payload(usage.request_events),
         },
         "pricing_notes": {
+            "pricing_catalog_source": pricing_catalog.get("source"),
+            "pricing_catalog_fetched_at_utc": pricing_catalog.get("fetched_at_utc"),
+            "pricing_catalog_url": pricing_catalog.get("source_url"),
+            "pricing_catalog_error": pricing_catalog.get("error"),
             "display_cost_is_multiplied": cost_breakdown.get("display_multiplier", 1.0) != 1.0,
             "display_multiplier": cost_breakdown.get("display_multiplier", 1.0),
             "raw_cost_usd": cost_breakdown.get("raw_total_cost_usd", 0.0),

@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     strong_model_override: str = ""
     weak_model_override: str = ""
     model_catalog_cache_ttl_hours: int = 24
+    pricing_catalog_cache_ttl_hours: int = 24
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/models"
     billing_currency: str = "USD"
     usd_to_eur_rate: float = 0.8677

@@ -11,6 +11,7 @@ import math
 from dataclasses import dataclass
 
 from ..core.config import settings
+from ..core.google_pricing import ModelPricing, effective_rates, get_pricing
 from .estimation_history import EstimateFeatures, learn_adjustment
 
 CHARS_PER_TOKEN = 3.7
@@ -23,60 +24,6 @@ _FLASH_TIME_PER_CALL_S = 30.0
 _PRO_PATCH_TIME_PER_CALL_S = 35.0
 _FLASH_PATCH_TIME_PER_CALL_S = 12.0
 _DISPLAY_COST_MULTIPLIER = 1.0
-_HIGH_CONTEXT_THRESHOLD = 200_000
-
-
-@dataclass(frozen=True)
-class ModelPricing:
-    input_per_m: float
-    output_per_m: float
-    label: str
-    cached_input_per_m: float | None = None
-    input_per_m_high: float | None = None
-    output_per_m_high: float | None = None
-    cached_input_per_m_high: float | None = None
-
-
-PRICING: list[tuple[str, ModelPricing]] = [
-    (
-        "gemini-3.1-pro-preview",
-        ModelPricing(
-            2.00,
-            12.00,
-            "Gemini 3.1 Pro Preview",
-            cached_input_per_m=0.20,
-            input_per_m_high=4.00,
-            output_per_m_high=18.00,
-            cached_input_per_m_high=0.40,
-        ),
-    ),
-    (
-        "gemini-3.1-flash-lite-preview",
-        ModelPricing(
-            0.25,
-            1.50,
-            "Gemini 3.1 Flash-Lite Preview",
-            cached_input_per_m=0.025,
-            input_per_m_high=0.25,
-            output_per_m_high=1.50,
-            cached_input_per_m_high=0.025,
-        ),
-    ),
-    ("gemini-3-pro-preview", ModelPricing(1.25, 10.00, "Gemini 3 Pro Preview")),
-    ("gemini-3-flash-preview", ModelPricing(0.50, 3.00, "Gemini 3 Flash Preview")),
-    ("gemini-2.5-pro", ModelPricing(1.25, 10.00, "Gemini 2.5 Pro")),
-    ("gemini-2.5-flash", ModelPricing(0.30, 2.50, "Gemini 2.5 Flash")),
-    ("gemini-2.5-flash-lite-preview-09-2025", ModelPricing(0.10, 0.40, "Gemini 2.5 Flash-Lite Preview")),
-]
-
-_UNKNOWN = ModelPricing(1.25, 10.00, "Unknown model")
-
-
-def get_pricing(model_id: str) -> tuple[ModelPricing, bool]:
-    for prefix, pricing in PRICING:
-        if model_id.startswith(prefix):
-            return pricing, True
-    return _UNKNOWN, False
 
 
 def _estimate_plan_billed_output_tokens(plan_output_tokens: int, chunk_count: int) -> tuple[int, int]:
@@ -358,20 +305,6 @@ def _fmt_eur(v_usd: float) -> str:
     return f"€{eur:.2f}"
 
 
-def _effective_rates(pricing: ModelPricing, prompt_tokens: int) -> tuple[float, float, float]:
-    use_high = prompt_tokens > _HIGH_CONTEXT_THRESHOLD
-    input_rate = pricing.input_per_m_high if use_high and pricing.input_per_m_high is not None else pricing.input_per_m
-    output_rate = pricing.output_per_m_high if use_high and pricing.output_per_m_high is not None else pricing.output_per_m
-    cached_rate = (
-        pricing.cached_input_per_m_high
-        if use_high and pricing.cached_input_per_m_high is not None
-        else pricing.cached_input_per_m
-    )
-    if cached_rate is None:
-        cached_rate = input_rate
-    return input_rate, output_rate, cached_rate
-
-
 def _event_cost(event: dict[str, object]) -> dict[str, float]:
     model_name = str(event.get("model", "") or "")
     pricing, _ = get_pricing(model_name)
@@ -385,7 +318,7 @@ def _event_cost(event: dict[str, object]) -> dict[str, float]:
     thinking_tokens = int(usage_meta.get("thoughtsTokenCount", 0) or 0)
     billed_output_tokens = completion_tokens + thinking_tokens
     noncached_prompt_tokens = max(0, prompt_tokens - cached_tokens)
-    input_rate, output_rate, cached_rate = _effective_rates(pricing, prompt_tokens)
+    input_rate, output_rate, cached_rate = effective_rates(pricing, prompt_tokens)
 
     input_cost = noncached_prompt_tokens / 1_000_000 * input_rate
     cached_input_cost = cached_tokens / 1_000_000 * cached_rate
