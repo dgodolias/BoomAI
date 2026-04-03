@@ -521,6 +521,68 @@ def collect_files(repo_path: str = ".", exclude: list[str] | None = None,
     return files
 
 
+def _normalize_repo_target(target: str, repo_path: str) -> str | None:
+    """Normalize a CLI target path into a repo-relative POSIX path."""
+    repo_root = Path(repo_path).resolve()
+    target_path = Path(target)
+
+    try:
+        resolved = target_path.resolve() if target_path.is_absolute() else (repo_root / target_path).resolve()
+    except OSError:
+        return None
+
+    try:
+        relative = resolved.relative_to(repo_root)
+    except ValueError:
+        return None
+
+    rel = relative.as_posix().strip("/")
+    return rel
+
+
+def _select_target_files(
+    all_files: list[str],
+    repo_path: str,
+    targets: list[str],
+) -> tuple[list[str], list[str]]:
+    """Select tracked files matching explicit file/folder targets."""
+    if not targets:
+        return all_files, []
+
+    selected: list[str] = []
+    unmatched: list[str] = []
+    known_files = set(all_files)
+
+    for raw_target in targets:
+        normalized = _normalize_repo_target(raw_target, repo_path)
+        if normalized is None:
+            unmatched.append(raw_target)
+            continue
+
+        if normalized == "":
+            for path in all_files:
+                if path not in selected:
+                    selected.append(path)
+            continue
+
+        if normalized in known_files:
+            if normalized not in selected:
+                selected.append(normalized)
+            continue
+
+        prefix = normalized.rstrip("/") + "/"
+        matches = [path for path in all_files if path.startswith(prefix)]
+        if matches:
+            for path in matches:
+                if path not in selected:
+                    selected.append(path)
+            continue
+
+        unmatched.append(raw_target)
+
+    return selected, unmatched
+
+
 def _walk_files(repo_path: str) -> list[str]:
     """Fallback: walk directory tree, skipping common non-source dirs."""
     skip_dirs = {".git", "node_modules", ".venv", "venv", "__pycache__",
@@ -696,6 +758,12 @@ def cmd_fix(args):
     all_files = collect_files(repo_path)
     if args.shallow:
         all_files = [f for f in all_files if "/" not in f]
+    selected_files, unmatched_targets = _select_target_files(all_files, repo_path, args.targets)
+    if args.targets:
+        print(f"    Targets: {', '.join(args.targets)}")
+    if unmatched_targets:
+        print(f"    Warning: no matches for {', '.join(unmatched_targets)}")
+    all_files = selected_files
     reviewable = filter_reviewable_files(all_files)
     languages = detect_languages(all_files)
 
@@ -902,6 +970,7 @@ def main():
 Examples (run from inside your project):
   boomai fix                      # scan + auto-fix codebase
   boomai fix --deep               # deeper, slower scan for higher coverage
+  boomai fix Assets/Scripts Game.cs  # only scan specific folders/files
   boomai settings                 # configure API key & preferences
 """,
     )
@@ -933,6 +1002,11 @@ Examples (run from inside your project):
         "--clean-run",
         action="store_true",
         help="Run without cost line, history write, or cost-report artifact.",
+    )
+    fix_parser.add_argument(
+        "targets",
+        nargs="*",
+        help="Optional folders/files to scan, relative or absolute.",
     )
 
     # --- settings ---
