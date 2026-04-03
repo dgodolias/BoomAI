@@ -2,8 +2,8 @@
 BoomAI CLI — AI-powered code fixer
 
 Usage (from inside your project):
-  boom-ai fix                     # scan + auto-fix codebase
-  boom-ai settings                # configure API key & preferences
+  boomai fix                      # scan + auto-fix codebase
+  boomai settings                 # configure API key & preferences
 """
 
 import argparse
@@ -43,11 +43,35 @@ _BOOM_COLORS = [
 ]
 
 
+def _enable_windows_vt() -> bool:
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        if handle in (0, -1):
+            return False
+        mode = ctypes.c_uint()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)) == 0:
+            return False
+        if kernel32.SetConsoleMode(handle, mode.value | 0x0004) == 0:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _supports_color() -> bool:
     if os.environ.get("NO_COLOR"):
         return False
+    if not sys.stdout.isatty():
+        return False
     term = os.environ.get("TERM", "")
-    return sys.stdout.isatty() and term.lower() != "dumb"
+    if term.lower() == "dumb":
+        return False
+    return _enable_windows_vt()
 
 
 def _rgb(color: tuple[int, int, int], text: str, *, bold: bool = False, dim: bool = False) -> str:
@@ -235,13 +259,13 @@ def print_banner():
         accent = "pixel-powered code fixer for C#/Unity"
         divider = _rgb((73, 20, 102), "· " * 18, dim=True)
         bomb = _rgb((255, 112, 158), "💣", bold=True)
-        title = _gradient_text("BOOM-AI", _BOOM_COLORS)
+        title = _gradient_text("BOOMAI", _BOOM_COLORS)
         print(f"  {divider}")
         print(f"  {bomb} {title}")
         print(f"  {_rgb((111, 32, 147), accent, dim=True)}")
         print(f"  {divider}")
     else:
-        print("  BOOM-AI")
+        print("  BOOMAI")
         print("  pixel-powered code fixer for C#/Unity")
     print()
 
@@ -580,7 +604,6 @@ async def run_local_scan(repo_path: str = ".",
                          exclude: list[str] | None = None,
                          include: list[str] | None = None,
                          comments: bool = False,
-                         explanations: bool = True,
                          on_chunk_done=None,
                          file_contents: list[tuple[str, str]] | None = None,
                          issue_seeds=None,
@@ -645,7 +668,6 @@ async def run_local_scan(repo_path: str = ".",
         file_contents=file_contents,
         detected_languages=languages,
         comments=comments,
-        explanations=explanations,
         on_progress=_progress,
         on_chunk_done=on_chunk_done,
         issue_seeds=issue_seeds,
@@ -726,7 +748,6 @@ def cmd_fix(args):
     code_index = build_code_index(file_contents, languages)
     t0 = time.monotonic()
     comments = settings.scan_comments
-    explanations = settings.scan_explanations
     analysis = run_static_analysis_suite(
         repo_path=repo_path,
         reviewable_files=reviewable,
@@ -745,7 +766,7 @@ def cmd_fix(args):
 
     try:
         review = asyncio.run(run_local_scan(
-            repo_path, comments=comments, explanations=explanations,
+            repo_path, comments=comments,
             on_chunk_done=_on_chunk_done,
             file_contents=file_contents,
             issue_seeds=analysis.prioritized_issue_seeds,
@@ -828,15 +849,13 @@ def cmd_settings(args):
             masked = "not set"
 
         comments_str = "ON" if settings.scan_comments else "OFF"
-        explanations_str = "ON" if settings.scan_explanations else "OFF"
-        reporting_str = "DETAILED" if settings.cost_reporting_enabled else "CLEAN"
+        reporting_str = "ON" if settings.cost_reporting_enabled else "OFF"
 
         print(f"\n  BoomAI Settings")
         print(f"  {'=' * 36}")
         print(f"  [1] Gemini API Key      {masked}")
         print(f"  [2] Inline comments     {comments_str}")
-        print(f"  [3] Explanations        {explanations_str}")
-        print(f"  [4] Run reporting       {reporting_str}")
+        print(f"  [4] Generate detailed cost report  {reporting_str}")
         print()
 
         try:
@@ -858,16 +877,11 @@ def cmd_settings(args):
             _save_setting("BOOMAI_SCAN_COMMENTS", str(new_val).lower())
             settings.scan_comments = new_val
             print(f"  Inline comments: {'ON' if new_val else 'OFF'}")
-        elif choice == "3":
-            new_val = not settings.scan_explanations
-            _save_setting("BOOMAI_SCAN_EXPLANATIONS", str(new_val).lower())
-            settings.scan_explanations = new_val
-            print(f"  Explanations: {'ON' if new_val else 'OFF'}")
         elif choice == "4":
             new_val = not settings.cost_reporting_enabled
             _save_setting("BOOMAI_COST_REPORTING_ENABLED", str(new_val).lower())
             settings.cost_reporting_enabled = new_val
-            print(f"  Run reporting: {'DETAILED' if new_val else 'CLEAN'}")
+            print(f"  Generate detailed cost report: {'ON' if new_val else 'OFF'}")
 
 
 # ============================================================
@@ -881,14 +895,14 @@ def main():
         reconfigure(errors="replace")
 
     parser = argparse.ArgumentParser(
-        prog="boom-ai",
+        prog="boomai",
         description="BoomAI — AI-powered code fixer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples (run from inside your project):
-  boom-ai fix                     # scan + auto-fix codebase
-  boom-ai fix --deep              # deeper, slower scan for higher coverage
-  boom-ai settings                # configure API key & preferences
+  boomai fix                      # scan + auto-fix codebase
+  boomai fix --deep               # deeper, slower scan for higher coverage
+  boomai settings                 # configure API key & preferences
 """,
     )
     sub = parser.add_subparsers(dest="command")

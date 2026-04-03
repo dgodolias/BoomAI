@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-boom-ai = "boomai.cli:main"
+boomai = "boomai.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["boomai"]

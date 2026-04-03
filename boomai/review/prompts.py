@@ -141,7 +141,6 @@ def build_plan_response_schema() -> dict:
 def build_scan_system_prompt(
     detected_languages: list[str],
     comments: bool = False,
-    explanations: bool = True,
     selected_pack_ids: list[str] | None = None,
 ) -> str:
     """Build system prompt for full-codebase scan mode."""
@@ -214,11 +213,9 @@ def build_scan_system_prompt(
         "- Avoid noisy style-only findings unless they are truly high-value",
     ])
 
-    if not explanations:
-        parts.append(
-            "- Keep the message field BRIEF (max 10 words, e.g. 'Thread.Sleep -> Task.Delay') "
-            "- do NOT explain why, just name the issue"
-        )
+    parts.append(
+        "- Keep each message compact and concrete; explain the risk in one sentence, not a paragraph"
+    )
 
     parts.extend([
         "",

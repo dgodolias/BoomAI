@@ -1048,7 +1048,6 @@ async def _scan_chunk(
     detected_languages: list[str],
     chunk_info: str = "",
     comments: bool = False,
-    explanations: bool = True,
     on_progress: ProgressFn = None,
     model_chain: _ModelChain | None = None,
     usage: UsageStats | None = None,
@@ -1110,7 +1109,6 @@ async def _scan_chunk(
     system_prompt = build_scan_system_prompt(
         detected_languages,
         comments=comments,
-        explanations=explanations,
         selected_pack_ids=selected_pack_ids,
     )
 
@@ -1185,7 +1183,7 @@ async def _scan_chunk(
                     on_progress(f"  {chunk_info} — rate limited on {failed}, switching to {next_model}")
                 return await _scan_chunk(
                     file_contents, detected_languages, chunk_info,
-                    comments=comments, explanations=explanations,
+                    comments=comments,
                     on_progress=on_progress, model_chain=model_chain,
                     usage=usage,
                     repo_file_map=repo_file_map,
@@ -1254,7 +1252,6 @@ async def _scan_chunk(
                     detected_languages,
                     chunk_info,
                     comments=comments,
-                    explanations=explanations,
                     on_progress=on_progress,
                     model_chain=model_chain,
                     usage=usage,
@@ -1287,7 +1284,6 @@ async def _scan_chunk(
                         detected_languages,
                         f"{chunk_info}/s{index}",
                         comments=comments,
-                        explanations=explanations,
                         on_progress=on_progress,
                         model_chain=_ModelChain(model_chain.current if model_chain else settings.llm_model),
                         usage=usage,
@@ -1346,7 +1342,7 @@ async def _scan_chunk(
             on_progress(f"  {chunk_info} - {reason}, retrying once{retry_note}")
         return await _scan_chunk(
             file_contents, detected_languages, chunk_info,
-            comments=comments, explanations=explanations,
+            comments=comments,
             on_progress=on_progress, model_chain=model_chain,
             usage=usage,
             repo_file_map=repo_file_map,
@@ -1361,7 +1357,6 @@ async def scan_with_gemini(
     file_contents: list[tuple[str, str]],
     detected_languages: list[str] | None = None,
     comments: bool = False,
-    explanations: bool = True,
     on_progress: Callable[[str], None] | None = None,
     on_chunk_done: Callable[[ReviewSummary], None] | None = None,
     issue_seeds: list[IssueSeed] | None = None,
@@ -1405,7 +1400,7 @@ async def scan_with_gemini(
             chunk_model_chain = _ModelChain(settings.llm_model)
             result = await _scan_chunk(
                 chunk, detected_languages, label,
-                comments=comments, explanations=explanations,
+                comments=comments,
                 on_progress=on_progress, model_chain=chunk_model_chain,
                 usage=usage,
                 repo_file_map=repo_file_map,
@@ -1469,7 +1464,7 @@ async def scan_with_gemini(
         chunk_model_chain = _ModelChain(settings.llm_model)
         result = await _scan_chunk(
             chunk, detected_languages, label,
-            comments=comments, explanations=explanations,
+            comments=comments,
             on_progress=on_progress, model_chain=chunk_model_chain,
             usage=usage,
             repo_file_map=repo_file_map,
