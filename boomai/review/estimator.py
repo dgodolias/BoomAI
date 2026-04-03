@@ -159,6 +159,7 @@ class ScanEstimate:
     features: EstimateFeatures
     learned_samples: int = 0
     learned_blended: bool = False
+    recorded_samples: int = 0
 
 
 def estimate_scan(
@@ -289,6 +290,7 @@ def estimate_scan(
     learned = learn_adjustment(features)
     learned_samples = 0
     learned_blended = False
+    recorded_samples = 0
     if learned is not None:
         cost_min = learned.cost_min
         cost_max = learned.cost_max
@@ -296,6 +298,10 @@ def estimate_scan(
         time_max = learned.time_max
         learned_samples = learned.samples
         learned_blended = learned.blended
+        recorded_samples = learned.samples
+    else:
+        from .estimation_history import get_record_count
+        recorded_samples = get_record_count()
 
     return ScanEstimate(
         profile=profile,
@@ -320,6 +326,7 @@ def estimate_scan(
         features=features,
         learned_samples=learned_samples,
         learned_blended=learned_blended,
+        recorded_samples=recorded_samples,
     )
 
 
@@ -579,6 +586,13 @@ def format_estimate(est: ScanEstimate) -> None:
     if est.learned_samples:
         learned_label = "lightly calibrated" if getattr(est, "learned_blended", False) else "calibrated"
         print(f"    Learned:     {learned_label} from {est.learned_samples} past run(s)")
+    else:
+        remaining = max(0, 3 - int(getattr(est, "recorded_samples", 0)))
+        if remaining > 0:
+            print(
+                f"    Learned:     waiting for {remaining} more recorded run(s) "
+                f"(have {getattr(est, 'recorded_samples', 0)})"
+            )
     if not est.is_known_model:
         print("    Warning:     Unknown model -- using conservative estimate")
     print(f"  {sep}\n")

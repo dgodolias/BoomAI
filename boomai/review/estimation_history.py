@@ -67,6 +67,10 @@ def _safe_save(records: list[dict]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def get_record_count() -> int:
+    return len(_safe_load())
+
+
 def _feature_vector(features: EstimateFeatures) -> list[float]:
     return [
         1.0,

@@ -1058,7 +1058,7 @@ def cmd_fix(args):
         applied_total = apply_local(review.findings, repo_path)
     elapsed = time.monotonic() - t0
     cost_report_path = None
-    if detailed_cost_report_enabled and review.usage and review.usage.api_calls > 0:
+    if review.usage and review.usage.api_calls > 0:
         record_run(
             features=estimate.features,
             elapsed_seconds=elapsed,
@@ -1067,6 +1067,7 @@ def cmd_fix(args):
             applied_count=applied_total,
             get_pricing=get_pricing,
         )
+    if detailed_cost_report_enabled and review.usage and review.usage.api_calls > 0:
         cost_report_path = write_run_cost_report(
             repo_path=repo_path,
             estimate=estimate,
