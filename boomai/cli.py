@@ -498,7 +498,7 @@ class _ScanProgressDisplay:
         if self.total_files > 0:
             total_units = float(self.total_files)
             completed_units = float(self.completed_files)
-            suffix = f" ({self.completed_files}/{self.total_files} files)"
+            suffix = f" ({self.completed_files}/{self.total_files} file coverage)"
         else:
             if self.total_weight <= 0:
                 return
