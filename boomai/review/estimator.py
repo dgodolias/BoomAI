@@ -171,6 +171,8 @@ def estimate_scan(
     profile: str = "default",
     patch_max_findings_per_chunk: int = 5,
     languages: list[str] | None = None,
+    model_label: str | None = None,
+    patch_model_label: str | None = None,
 ) -> ScanEstimate:
     """Estimate cost and time for the full two-stage scan."""
     from boomai.review.gemini_review import (
@@ -298,9 +300,9 @@ def estimate_scan(
     return ScanEstimate(
         profile=profile,
         model=model,
-        model_label=pricing.label,
+        model_label=model_label or pricing.label,
         patch_model=patch_model,
-        patch_model_label=patch_pricing.label,
+        patch_model_label=patch_model_label or patch_pricing.label,
         is_known_model=is_known,
         file_count=len(file_contents),
         total_chars=total_chars,

@@ -110,6 +110,7 @@ def write_run_cost_report(
     repo_path: str,
     estimate: ScanEstimate,
     review,
+    runtime_models=None,
     elapsed_seconds: float,
     applied_count: int,
     issue_seed_count: int,
@@ -126,11 +127,24 @@ def write_run_cost_report(
 
     cost_breakdown = compute_usage_cost_breakdown(usage)
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": run_id,
         "created_at_utc": _iso_now(),
         "repo_path": str(Path(repo_path).resolve()),
         "estimate": _estimate_payload(estimate),
+        "model_resolution": (
+            {
+                "source": getattr(runtime_models, "source", ""),
+                "fetched_at_utc": getattr(runtime_models, "fetched_at_utc", None),
+                "strong_mode": getattr(runtime_models, "strong_mode", "auto"),
+                "weak_mode": getattr(runtime_models, "weak_mode", "auto"),
+                "strong_model_id": getattr(runtime_models, "strong_model_id", estimate.model),
+                "weak_model_id": getattr(runtime_models, "weak_model_id", estimate.patch_model),
+                "strong_display_name": getattr(runtime_models, "strong_display_name", estimate.model_label),
+                "weak_display_name": getattr(runtime_models, "weak_display_name", estimate.patch_model_label),
+            }
+            if runtime_models is not None else None
+        ),
         "actual": {
             "elapsed_seconds": elapsed_seconds,
             "findings_count": len(review.findings),

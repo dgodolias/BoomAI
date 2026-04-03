@@ -9,8 +9,13 @@ _global_env = Path.home() / ".boomai" / ".env"
 class Settings(BaseSettings):
     # Gemini API (same pattern as DataViz)
     google_api_key: str = ""
-    llm_model: str = "gemini-3.1-pro-preview"
-    patch_llm_model: str = "gemini-3.1-flash-lite-preview"
+    strong_model: str = ""
+    weak_model: str = ""
+    strong_model_mode: str = "auto"
+    weak_model_mode: str = "auto"
+    strong_model_override: str = ""
+    weak_model_override: str = ""
+    model_catalog_cache_ttl_hours: int = 24
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/models"
     billing_currency: str = "USD"
     usd_to_eur_rate: float = 0.8677

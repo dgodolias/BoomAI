@@ -23,6 +23,7 @@ from boomai.analysis.languages import detect_languages, filter_reviewable_files
 from boomai.app.orchestrator import run_static_analysis_suite
 from boomai.context.indexer import build_code_index
 from boomai.core.config import settings
+from boomai.core.google_models import apply_runtime_models, get_runtime_models
 from boomai.core.models import ReviewSummary
 from boomai.review.progress_history import ChunkProgressFeatures, predict_chunk_elapsed_seconds
 
@@ -860,6 +861,7 @@ def _apply_scan_profile(profile: str) -> None:
 async def run_local_scan(repo_path: str = ".",
                          exclude: list[str] | None = None,
                          include: list[str] | None = None,
+                         runtime_models=None,
                          comments: bool = False,
                          on_chunk_done=None,
                          on_progress=None,
@@ -916,8 +918,9 @@ async def run_local_scan(repo_path: str = ".",
         languages = detect_languages([p for p, _ in file_contents])
 
     total_chars = sum(len(c) for _, c in file_contents)
+    scan_model = runtime_models.strong_model_id if runtime_models else settings.strong_model
     print(f"    {total_chars:,} chars across {len(file_contents)} files")
-    print(f"    Model: {settings.llm_model}")
+    print(f"    Model: {scan_model}")
 
     def _progress(msg: str) -> None:
         if on_progress:
@@ -928,6 +931,7 @@ async def run_local_scan(repo_path: str = ".",
     return await scan_with_gemini(
         file_contents=file_contents,
         detected_languages=languages,
+        runtime_models=runtime_models,
         comments=comments,
         on_progress=_progress,
         on_chunk_done=on_chunk_done,
@@ -945,6 +949,8 @@ def cmd_fix(args):
     require_api_key()
     profile = "deep" if getattr(args, "deep", False) else getattr(args, "profile", settings.scan_profile)
     _apply_scan_profile(profile)
+    runtime_models = get_runtime_models()
+    apply_runtime_models(runtime_models)
     detailed_cost_report_enabled = settings.cost_reporting_enabled
     if getattr(args, "cost_report", False):
         detailed_cost_report_enabled = True
@@ -986,8 +992,10 @@ def cmd_fix(args):
     # ── Estimate cost & time ──────────────────────────────
     estimate = estimate_scan(
         file_contents=file_contents,
-        model=settings.llm_model,
-        patch_model=settings.patch_llm_model,
+        model=runtime_models.strong_model_id,
+        patch_model=runtime_models.weak_model_id,
+        model_label=runtime_models.strong_display_name,
+        patch_model_label=runtime_models.weak_display_name,
         max_scan_chars=settings.max_scan_chars,
         scan_output_tokens=settings.scan_output_tokens,
         plan_output_tokens=settings.plan_output_tokens,
@@ -1018,7 +1026,7 @@ def cmd_fix(args):
     progress_display = _ScanProgressDisplay(
         debug=settings.scan_debug,
         total_files=len(file_contents),
-        scan_model=settings.llm_model,
+        scan_model=runtime_models.strong_model_id,
         profile=settings.scan_profile,
     )
     analysis = run_static_analysis_suite(
@@ -1031,6 +1039,7 @@ def cmd_fix(args):
     try:
         review = asyncio.run(run_local_scan(
             repo_path, comments=comments,
+            runtime_models=runtime_models,
             on_progress=progress_display.emit,
             file_contents=file_contents,
             issue_seeds=analysis.prioritized_issue_seeds,
@@ -1062,6 +1071,7 @@ def cmd_fix(args):
             repo_path=repo_path,
             estimate=estimate,
             review=review,
+            runtime_models=runtime_models,
             elapsed_seconds=elapsed,
             applied_count=applied_total,
             issue_seed_count=len(analysis.prioritized_issue_seeds),
@@ -1094,6 +1104,18 @@ def _save_setting(env_key: str, value: str):
     GLOBAL_ENV_FILE.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
+def _unset_setting(env_key: str):
+    """Remove a BOOMAI_* setting from ~/.boomai/.env if present."""
+    if not GLOBAL_ENV_FILE.exists():
+        return
+    lines = GLOBAL_ENV_FILE.read_text(encoding="utf-8").splitlines()
+    new_lines = [line for line in lines if not line.startswith(f"{env_key}=")]
+    if new_lines:
+        GLOBAL_ENV_FILE.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    else:
+        GLOBAL_ENV_FILE.write_text("", encoding="utf-8")
+
+
 def require_api_key():
     if settings.google_api_key:
         return
@@ -1109,25 +1131,99 @@ def require_api_key():
     print()
 
 
+def _mask_api_key(key: str) -> str:
+    if not key:
+        return "not set"
+    return key[:8] + "..." + key[-4:] if len(key) > 12 else "***"
+
+
+def _format_model_choice(entry) -> str:
+    alias_suffix = " [alias]" if getattr(entry, "is_alias", False) else ""
+    return f"{entry.display_name} [{entry.model_id}]{alias_suffix}"
+
+
+def _set_model_role(role: str, *, mode: str, override: str = "") -> None:
+    mode_env = f"BOOMAI_{role.upper()}_MODEL_MODE"
+    override_env = f"BOOMAI_{role.upper()}_MODEL_OVERRIDE"
+    if mode == "auto":
+        _save_setting(mode_env, "auto")
+        _unset_setting(override_env)
+        setattr(settings, f"{role}_model_mode", "auto")
+        setattr(settings, f"{role}_model_override", "")
+        return
+
+    normalized_override = override.strip()
+    if not normalized_override:
+        return
+    _save_setting(mode_env, "manual")
+    _save_setting(override_env, normalized_override)
+    setattr(settings, f"{role}_model_mode", "manual")
+    setattr(settings, f"{role}_model_override", normalized_override)
+
+
+def _pick_role_model(role: str, runtime_models) -> None:
+    role_title = role.title()
+    candidates = list(runtime_models.strong_candidates if role == "strong" else runtime_models.weak_candidates)
+    current_model_id = runtime_models.strong_model_id if role == "strong" else runtime_models.weak_model_id
+    current_mode = runtime_models.strong_mode if role == "strong" else runtime_models.weak_mode
+
+    while True:
+        print(f"\n  {role_title} model")
+        print(f"  {'-' * 36}")
+        print(f"  Current: {current_mode.upper()} -> {current_model_id}")
+        print(f"  [0] Reset to AUTO")
+        for index, entry in enumerate(candidates, start=1):
+            marker = " (current)" if entry.model_id == current_model_id else ""
+            print(f"  [{index}] {_format_model_choice(entry)}{marker}")
+        print()
+        choice = input("  Choose model (q to cancel): ").strip().lower()
+        if choice in {"", "q"}:
+            return
+        if choice == "0":
+            _set_model_role(role, mode="auto")
+            print(f"  {role_title} model: AUTO")
+            return
+        if not choice.isdigit():
+            print("  Enter a valid number.")
+            continue
+        index = int(choice)
+        if index < 1 or index > len(candidates):
+            print("  Enter a valid number.")
+            continue
+        selected = candidates[index - 1]
+        _set_model_role(role, mode="manual", override=selected.model_id)
+        print(f"  {role_title} model: {selected.display_name}")
+        return
+
+
 def cmd_settings(args):
     """Interactive settings menu."""
     while True:
-        key = settings.google_api_key
-        if key:
-            masked = key[:8] + "..." + key[-4:] if len(key) > 12 else "***"
-        else:
-            masked = "not set"
-
+        runtime_models = get_runtime_models()
+        apply_runtime_models(runtime_models)
+        masked = _mask_api_key(settings.google_api_key)
         comments_str = "ON" if settings.scan_comments else "OFF"
         debug_str = "ON" if settings.scan_debug else "OFF"
         reporting_str = "ON" if settings.cost_reporting_enabled else "OFF"
 
         print(f"\n  BoomAI Settings")
-        print(f"  {'=' * 36}")
-        print(f"  [1] Gemini API Key      {masked}")
-        print(f"  [2] Inline comments     {comments_str}")
-        print(f"  [3] Debug logs          {debug_str}")
-        print(f"  [4] Generate detailed cost report  {reporting_str}")
+        print(f"  {'=' * 54}")
+        print(f"  Catalog source: {runtime_models.source.upper()}")
+        if runtime_models.catalog_error:
+            print(f"  Note: using {runtime_models.source} catalog after refresh error.")
+        print(f"  [1] Gemini API Key                    {masked}")
+        print(
+            f"  [2] Strong model ({runtime_models.strong_mode.upper()})"
+            f"          {runtime_models.strong_display_name} [{runtime_models.strong_model_id}]"
+        )
+        print(
+            f"  [3] Weak model ({runtime_models.weak_mode.upper()})"
+            f"            {runtime_models.weak_display_name} [{runtime_models.weak_model_id}]"
+        )
+        print(f"  [4] Inline comments                  {comments_str}")
+        print(f"  [5] Debug logs                       {debug_str}")
+        print(f"  [6] Generate detailed cost report    {reporting_str}")
+        print(f"  [7] Refresh model catalog now")
         print()
 
         try:
@@ -1144,21 +1240,35 @@ def cmd_settings(args):
                 _save_setting("BOOMAI_GOOGLE_API_KEY", new_key)
                 settings.google_api_key = new_key
                 print(f"  Key saved.")
+                runtime_models = get_runtime_models(force_refresh=True)
+                apply_runtime_models(runtime_models)
         elif choice == "2":
+            _pick_role_model("strong", runtime_models)
+        elif choice == "3":
+            _pick_role_model("weak", runtime_models)
+        elif choice == "4":
             new_val = not settings.scan_comments
             _save_setting("BOOMAI_SCAN_COMMENTS", str(new_val).lower())
             settings.scan_comments = new_val
             print(f"  Inline comments: {'ON' if new_val else 'OFF'}")
-        elif choice == "3":
+        elif choice == "5":
             new_val = not settings.scan_debug
             _save_setting("BOOMAI_SCAN_DEBUG", str(new_val).lower())
             settings.scan_debug = new_val
             print(f"  Debug logs: {'ON' if new_val else 'OFF'}")
-        elif choice == "4":
+        elif choice == "6":
             new_val = not settings.cost_reporting_enabled
             _save_setting("BOOMAI_COST_REPORTING_ENABLED", str(new_val).lower())
             settings.cost_reporting_enabled = new_val
             print(f"  Generate detailed cost report: {'ON' if new_val else 'OFF'}")
+        elif choice == "7":
+            refreshed = get_runtime_models(force_refresh=True)
+            apply_runtime_models(refreshed)
+            print(
+                f"  Refreshed model catalog: "
+                f"strong={refreshed.strong_model_id}, weak={refreshed.weak_model_id} "
+                f"({refreshed.source.upper()})"
+            )
 
 
 # ============================================================

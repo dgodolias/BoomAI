@@ -11,6 +11,7 @@ from typing import Callable
 import httpx
 
 from ..core.config import settings
+from ..core.google_models import RuntimeModels, build_generate_content_url
 from ..core.models import IssueSeed, ReviewComment, ReviewSummary, Severity, UsageStats
 from .pack_selector import select_prompt_pack_ids
 from .progress_history import ChunkProgressFeatures, record_chunk_elapsed
@@ -26,29 +27,11 @@ logger = logging.getLogger(__name__)
 # Type alias for progress callback
 ProgressFn = Callable[[str], None] | None
 
-# Model fallback chain — each model has separate rate limits (RPM/RPD)
-_FALLBACK_MODELS = [
-    "gemini-3.1-pro-preview",
-    "gemini-3.1-flash-lite-preview",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite-preview-09-2025",
-]
-
-_PATCH_FALLBACK_MODELS = [
-    "gemini-3.1-flash-lite-preview",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite-preview-09-2025",
-    "gemini-3.1-pro-preview",
-    "gemini-2.5-pro",
-]
-
-
 class _ModelChain:
     """Thread-safe model fallback chain for 429 rate limits."""
 
     def __init__(self, initial_model: str, models: list[str] | None = None):
-        self._models = list(models or _FALLBACK_MODELS)
+        self._models = list(models or [initial_model])
         try:
             self._index = self._models.index(initial_model)
         except ValueError:
@@ -59,6 +42,10 @@ class _ModelChain:
     @property
     def current(self) -> str:
         return self._models[self._index]
+
+    @property
+    def models(self) -> list[str]:
+        return list(self._models)
 
     @property
     def exhausted(self) -> bool:
@@ -73,10 +60,7 @@ class _ModelChain:
             return self.current if not self.exhausted else None
 
     def build_url(self) -> str:
-        return (
-            f"{settings.gemini_base_url}/{self.current}"
-            f":generateContent?key={settings.google_api_key}"
-        )
+        return build_generate_content_url(self.current)
 
 
 async def _with_heartbeat(
@@ -855,6 +839,8 @@ async def _generate_fixes_for_group(
     repo_file_map: dict[str, str],
     issue_seeds: list[IssueSeed] | None = None,
     code_index=None,
+    patch_model: str = "",
+    patch_fallback_models: tuple[str, ...] | list[str] | None = None,
     comments: bool = False,
     on_progress: ProgressFn = None,
     usage: UsageStats | None = None,
@@ -914,18 +900,15 @@ async def _generate_fixes_for_group(
         related_snippets=related_snippets,
     )
     output_tokens = settings.patch_output_tokens
-    model_name = model_chain.current if model_chain else settings.patch_llm_model
-    url = model_chain.build_url() if model_chain else (
-        f"{settings.gemini_base_url}/{settings.patch_llm_model}"
-        f":generateContent?key={settings.google_api_key}"
-    )
+    model_name = model_chain.current if model_chain else patch_model
+    url = model_chain.build_url() if model_chain else build_generate_content_url(patch_model)
     effective_timeout = settings.patch_timeout
 
     if settings.scan_debug and on_progress:
         on_progress(
             f"  {label} patch - prompt chars: system={len(system_prompt):,}, "
             f"user={len(user_message):,}, packs={','.join(selected_pack_ids)}, "
-            f"model={model_chain.current if model_chain else settings.patch_llm_model}"
+            f"model={model_chain.current if model_chain else patch_model}"
         )
 
     try:
@@ -961,6 +944,8 @@ async def _generate_fixes_for_group(
                 repo_file_map=repo_file_map,
                 issue_seeds=issue_seeds,
                 code_index=code_index,
+                patch_model=patch_model,
+                patch_fallback_models=patch_fallback_models,
                 comments=comments,
                 on_progress=on_progress,
                 usage=usage,
@@ -1012,6 +997,8 @@ async def _attach_fixes_for_chunk(
     repo_file_map: dict[str, str],
     issue_seeds: list[IssueSeed] | None = None,
     code_index=None,
+    patch_model: str = "",
+    patch_fallback_models: tuple[str, ...] | list[str] | None = None,
     comments: bool = False,
     on_progress: ProgressFn = None,
     usage: UsageStats | None = None,
@@ -1042,11 +1029,11 @@ async def _attach_fixes_for_chunk(
         on_progress(
             f"  {chunk_label} patching {selected_count} finding(s) across "
             f"{len(selected_groups)} patch set(s) "
-            f"[{_compute_patch_concurrency(settings.patch_llm_model, len(selected_groups))} concurrent]"
+            f"[{_compute_patch_concurrency(patch_model, len(selected_groups))} concurrent]"
         )
 
     patch_index: dict[tuple[str, int, str], ReviewComment] = {}
-    patch_concurrency = _compute_patch_concurrency(settings.patch_llm_model, len(selected_groups))
+    patch_concurrency = _compute_patch_concurrency(patch_model, len(selected_groups))
     sem = asyncio.Semaphore(patch_concurrency)
 
     async def _run_patch(idx: int, group: list[ReviewComment]) -> dict[tuple[str, int, str], ReviewComment]:
@@ -1057,10 +1044,12 @@ async def _attach_fixes_for_chunk(
                 repo_file_map=repo_file_map,
                 issue_seeds=issue_seeds,
                 code_index=code_index,
+                patch_model=patch_model,
+                patch_fallback_models=patch_fallback_models,
                 comments=comments,
                 on_progress=on_progress,
                 usage=usage,
-                model_chain=_ModelChain(settings.patch_llm_model, models=_PATCH_FALLBACK_MODELS),
+                model_chain=_ModelChain(patch_model, models=list(patch_fallback_models or [patch_model])),
                 label=label,
             )
 
@@ -1137,6 +1126,7 @@ async def _plan_chunks(
     file_contents: list[tuple[str, str]],
     detected_languages: list[str],
     char_budget: int,
+    plan_model: str,
     on_progress: ProgressFn = None,
     model_chain: _ModelChain | None = None,
     usage: UsageStats | None = None,
@@ -1153,10 +1143,7 @@ async def _plan_chunks(
     system_prompt = build_plan_prompt(char_budget)
     user_message = build_plan_user_message(repo_map, total_files, total_chars)
 
-    url = model_chain.build_url() if model_chain else (
-        f"{settings.gemini_base_url}/{settings.llm_model}"
-        f":generateContent?key={settings.google_api_key}"
-    )
+    url = model_chain.build_url() if model_chain else build_generate_content_url(plan_model)
 
     def _on_retry(attempt: int, msg: str) -> None:
         _emit(f"  Attempt {attempt} failed: {msg}")
@@ -1168,7 +1155,7 @@ async def _plan_chunks(
                     "system_instruction": {"parts": [{"text": system_prompt}]},
                     "contents": [{"role": "user", "parts": [{"text": user_message}]}],
                     "generationConfig": _build_generation_config(
-                        model_chain.current if model_chain else settings.llm_model,
+                        model_chain.current if model_chain else plan_model,
                         settings.plan_output_tokens,
                         response_json_schema=build_plan_response_schema(),
                     ),
@@ -1187,7 +1174,7 @@ async def _plan_chunks(
         if next_model:
             _emit(f"  Planning rate limited on {failed}, retrying with {next_model}")
             return await _plan_chunks(
-                file_contents, detected_languages, char_budget,
+                file_contents, detected_languages, char_budget, plan_model,
                 on_progress=on_progress, model_chain=model_chain,
                 usage=usage,
             )
@@ -1202,7 +1189,7 @@ async def _plan_chunks(
         if usage:
             usage.add(
                 result,
-                model_chain.current if model_chain else settings.llm_model,
+                model_chain.current if model_chain else plan_model,
                 stage="plan",
                 request_label="planning",
                 extra={
@@ -1382,6 +1369,7 @@ def _split_single_file_into_sections(
 async def _scan_chunk(
     file_contents: list[tuple[str, str]],
     detected_languages: list[str],
+    scan_model: str,
     chunk_info: str = "",
     comments: bool = False,
     on_progress: ProgressFn = None,
@@ -1464,7 +1452,7 @@ async def _scan_chunk(
     if output_tokens_override is not None:
         requested_output_tokens = output_tokens_override
 
-    model_name = model_chain.current if model_chain else settings.llm_model
+    model_name = model_chain.current if model_chain else scan_model
     output_tokens = _normalize_scan_output_tokens(model_name, requested_output_tokens)
     generation_config = _build_generation_config(
         model_name,
@@ -1483,10 +1471,7 @@ async def _scan_chunk(
             f"model={model_name}"
         )
 
-    url = model_chain.build_url() if model_chain else (
-        f"{settings.gemini_base_url}/{settings.llm_model}"
-        f":generateContent?key={settings.google_api_key}"
-    )
+    url = model_chain.build_url() if model_chain else build_generate_content_url(scan_model)
 
     def _on_retry(attempt: int, msg: str) -> None:
         if on_progress:
@@ -1523,7 +1508,7 @@ async def _scan_chunk(
                 if on_progress:
                     on_progress(f"  {chunk_info} — rate limited on {failed}, switching to {next_model}")
                 return await _scan_chunk(
-                    file_contents, detected_languages, chunk_info,
+                    file_contents, detected_languages, scan_model, chunk_info,
                     comments=comments,
                     on_progress=on_progress, model_chain=model_chain,
                     usage=usage,
@@ -1615,6 +1600,7 @@ async def _scan_chunk(
                 return await _scan_chunk(
                     file_contents,
                     detected_languages,
+                    scan_model,
                     chunk_info,
                     comments=comments,
                     on_progress=on_progress,
@@ -1647,10 +1633,14 @@ async def _scan_chunk(
                     section_result = await _scan_chunk(
                         section_files,
                         detected_languages,
+                        scan_model,
                         f"{chunk_info}/s{index}",
                         comments=comments,
                         on_progress=on_progress,
-                        model_chain=_ModelChain(model_chain.current if model_chain else settings.llm_model),
+                        model_chain=_ModelChain(
+                            model_chain.current if model_chain else scan_model,
+                            models=model_chain.models if model_chain else [scan_model],
+                        ),
                         usage=usage,
                         repo_file_map=repo_file_map,
                         issue_seeds=issue_seeds,
@@ -1713,7 +1703,7 @@ async def _scan_chunk(
                         f"({retry_output_tokens:,})"
                     )
                 return await _scan_chunk(
-                    file_contents, detected_languages, chunk_info,
+                    file_contents, detected_languages, scan_model, chunk_info,
                     comments=comments,
                     on_progress=on_progress, model_chain=model_chain,
                     usage=usage,
@@ -1737,7 +1727,7 @@ async def _scan_chunk(
             reason = "partial JSON recovered" if parse_status == "recovered" else "malformed JSON response"
             on_progress(f"  {chunk_info} - {reason}, retrying once{retry_note}")
         return await _scan_chunk(
-            file_contents, detected_languages, chunk_info,
+            file_contents, detected_languages, scan_model, chunk_info,
             comments=comments,
             on_progress=on_progress, model_chain=model_chain,
             usage=usage,
@@ -1752,6 +1742,7 @@ async def _scan_chunk(
 async def scan_with_gemini(
     file_contents: list[tuple[str, str]],
     detected_languages: list[str] | None = None,
+    runtime_models: RuntimeModels | None = None,
     comments: bool = False,
     on_progress: Callable[[str], None] | None = None,
     on_chunk_done: Callable[[ReviewSummary], None] | None = None,
@@ -1770,14 +1761,19 @@ async def scan_with_gemini(
         if on_progress:
             on_progress(msg)
 
-    plan_model_chain = _ModelChain(settings.llm_model)
+    scan_model = runtime_models.strong_model_id if runtime_models else settings.strong_model
+    patch_model = runtime_models.weak_model_id if runtime_models else settings.weak_model
+    strong_fallback_models = list(runtime_models.strong_fallback_models) if runtime_models else [scan_model]
+    weak_fallback_models = list(runtime_models.weak_fallback_models) if runtime_models else [patch_model]
+
+    plan_model_chain = _ModelChain(scan_model, models=strong_fallback_models)
     usage = UsageStats()
     repo_file_map = {path: content for path, content in file_contents}
 
     # Always try LLM planning first — hard timeout protects us
     _emit("Planning review chunks...")
     chunks = await _plan_chunks(
-        file_contents, detected_languages, settings.max_scan_chars,
+        file_contents, detected_languages, settings.max_scan_chars, scan_model,
         on_progress=on_progress, model_chain=plan_model_chain, usage=usage,
     )
     if chunks is None:
@@ -1794,9 +1790,9 @@ async def scan_with_gemini(
             chunk: list[tuple[str, str]], label: str,
         ) -> ReviewSummary:
             started_at = time.monotonic()
-            chunk_model_chain = _ModelChain(settings.llm_model)
+            chunk_model_chain = _ModelChain(scan_model, models=strong_fallback_models)
             result = await _scan_chunk(
-                chunk, detected_languages, label,
+                chunk, detected_languages, scan_model, label,
                 comments=comments,
                 on_progress=on_progress, model_chain=chunk_model_chain,
                 usage=usage,
@@ -1829,6 +1825,8 @@ async def scan_with_gemini(
                 repo_file_map=repo_file_map,
                 issue_seeds=issue_seeds,
                 code_index=code_index,
+                patch_model=patch_model,
+                patch_fallback_models=weak_fallback_models,
                 comments=comments,
                 on_progress=on_progress,
                 usage=usage,
@@ -1839,7 +1837,7 @@ async def scan_with_gemini(
                     chunk_chars=sum(len(content) for _, content in chunk),
                     file_count=len(chunk),
                     split_depth=_chunk_split_depth(label),
-                    scan_model_flash=int("flash" in settings.llm_model.lower()),
+                    scan_model_flash=int("flash" in scan_model.lower()),
                     profile_deep=int(settings.scan_profile == "deep"),
                 ),
                 time.monotonic() - started_at,
@@ -1855,13 +1853,13 @@ async def scan_with_gemini(
         return result
 
     # Multiple chunks — call Gemini concurrently, merge results
-    max_concurrent = _compute_scan_concurrency(settings.llm_model, len(chunks))
+    max_concurrent = _compute_scan_concurrency(scan_model, len(chunks))
     sem = asyncio.Semaphore(max_concurrent)
     stop_event = asyncio.Event()  # set on 429 — stops all remaining chunks
     completed = 0
     _emit(
         f"Reviewing code [{len(chunks)} chunks, {max_concurrent} concurrent, "
-        f"model={settings.llm_model}]"
+        f"model={scan_model}]"
     )
 
     async def _review_chunk(
@@ -1873,9 +1871,9 @@ async def scan_with_gemini(
         started_at = time.monotonic()
         chars = sum(len(c) for _, c in chunk)
         _emit(f"{label} {len(chunk)} files, {chars:,} chars...")
-        chunk_model_chain = _ModelChain(settings.llm_model)
+        chunk_model_chain = _ModelChain(scan_model, models=strong_fallback_models)
         result = await _scan_chunk(
-            chunk, detected_languages, label,
+            chunk, detected_languages, scan_model, label,
             comments=comments,
             on_progress=on_progress, model_chain=chunk_model_chain,
             usage=usage,
@@ -1913,6 +1911,8 @@ async def scan_with_gemini(
             repo_file_map=repo_file_map,
             issue_seeds=issue_seeds,
             code_index=code_index,
+            patch_model=patch_model,
+            patch_fallback_models=weak_fallback_models,
             comments=comments,
             on_progress=on_progress,
             usage=usage,
@@ -1923,7 +1923,7 @@ async def scan_with_gemini(
                 chunk_chars=chars,
                 file_count=len(chunk),
                 split_depth=_chunk_split_depth(label),
-                scan_model_flash=int("flash" in settings.llm_model.lower()),
+                scan_model_flash=int("flash" in scan_model.lower()),
                 profile_deep=int(settings.scan_profile == "deep"),
             ),
             time.monotonic() - started_at,
