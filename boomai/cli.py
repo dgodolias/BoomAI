@@ -427,7 +427,13 @@ def _format_elapsed(seconds: float) -> str:
     return f"{s // 60}m {s % 60}s"
 
 
-def print_review(review: ReviewSummary, applied: int = 0, elapsed: float = 0):
+def print_review(
+    review: ReviewSummary,
+    applied: int = 0,
+    elapsed: float = 0,
+    *,
+    show_usage: bool = True,
+):
     fixable = sum(1 for f in review.findings if f.suggestion and f.old_code)
     non_fixable = len(review.findings) - fixable
     print(f"\n  {'='*56}")
@@ -437,7 +443,7 @@ def print_review(review: ReviewSummary, applied: int = 0, elapsed: float = 0):
     if elapsed:
         parts.append(_format_elapsed(elapsed))
     print(f"  {' | '.join(parts)}")
-    if review.usage and review.usage.api_calls > 0:
+    if show_usage and review.usage and review.usage.api_calls > 0:
         from boomai.review.estimator import format_actual_cost
         print(format_actual_cost(review.usage))
         if len(review.usage.per_model) > 1:
@@ -656,6 +662,11 @@ def cmd_fix(args):
     require_api_key()
     profile = "deep" if getattr(args, "deep", False) else getattr(args, "profile", settings.scan_profile)
     _apply_scan_profile(profile)
+    cost_reporting_enabled = settings.cost_reporting_enabled
+    if getattr(args, "cost_report", False):
+        cost_reporting_enabled = True
+    if getattr(args, "clean_run", False):
+        cost_reporting_enabled = False
     repo_path = os.path.abspath(".")
 
     # ── Collect files ─────────────────────────────────────
@@ -747,7 +758,7 @@ def cmd_fix(args):
         return
     elapsed = time.monotonic() - t0
     cost_report_path = None
-    if review.usage and review.usage.api_calls > 0:
+    if cost_reporting_enabled and review.usage and review.usage.api_calls > 0:
         record_run(
             features=estimate.features,
             elapsed_seconds=elapsed,
@@ -765,7 +776,7 @@ def cmd_fix(args):
             issue_seed_count=len(analysis.prioritized_issue_seeds),
             languages=languages,
         )
-    print_review(review, applied=applied_total, elapsed=elapsed)
+    print_review(review, applied=applied_total, elapsed=elapsed, show_usage=cost_reporting_enabled)
     if cost_report_path is not None:
         print(f"  Cost report: {cost_report_path}")
 
@@ -818,12 +829,14 @@ def cmd_settings(args):
 
         comments_str = "ON" if settings.scan_comments else "OFF"
         explanations_str = "ON" if settings.scan_explanations else "OFF"
+        reporting_str = "DETAILED" if settings.cost_reporting_enabled else "CLEAN"
 
         print(f"\n  BoomAI Settings")
         print(f"  {'=' * 36}")
         print(f"  [1] Gemini API Key      {masked}")
         print(f"  [2] Inline comments     {comments_str}")
         print(f"  [3] Explanations        {explanations_str}")
+        print(f"  [4] Run reporting       {reporting_str}")
         print()
 
         try:
@@ -850,6 +863,11 @@ def cmd_settings(args):
             _save_setting("BOOMAI_SCAN_EXPLANATIONS", str(new_val).lower())
             settings.scan_explanations = new_val
             print(f"  Explanations: {'ON' if new_val else 'OFF'}")
+        elif choice == "4":
+            new_val = not settings.cost_reporting_enabled
+            _save_setting("BOOMAI_COST_REPORTING_ENABLED", str(new_val).lower())
+            settings.cost_reporting_enabled = new_val
+            print(f"  Run reporting: {'DETAILED' if new_val else 'CLEAN'}")
 
 
 # ============================================================
@@ -891,6 +909,16 @@ Examples (run from inside your project):
         "--deep",
         action="store_true",
         help="Shortcut for --profile deep.",
+    )
+    fix_parser.add_argument(
+        "--cost-report",
+        action="store_true",
+        help="Force detailed cost/reporting output for this run.",
+    )
+    fix_parser.add_argument(
+        "--clean-run",
+        action="store_true",
+        help="Run without cost line, history write, or cost-report artifact.",
     )
 
     # --- settings ---

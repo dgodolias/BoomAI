@@ -190,15 +190,47 @@ def _prediction_interval(
 
 
 def _calc_actual_cost(usage: UsageStats, get_pricing) -> float:
-    total = 0.0
-    if usage.per_model:
-        for model_name, bucket in usage.per_model.items():
+    if getattr(usage, "request_events", None):
+        total = 0.0
+        for event in usage.request_events:
+            if not isinstance(event, dict):
+                continue
+            model_name = str(event.get("model", "") or "")
             pricing, _ = get_pricing(model_name)
+            usage_meta = event.get("usage_metadata", {}) or {}
+            if not isinstance(usage_meta, dict):
+                usage_meta = {}
+            prompt_tokens = int(event.get("prompt_tokens", 0) or 0)
+            completion_tokens = int(event.get("completion_tokens", 0) or 0)
+            cached_tokens = int(usage_meta.get("cachedContentTokenCount", 0) or 0)
+            thinking_tokens = int(usage_meta.get("thoughtsTokenCount", 0) or 0)
+            use_high = prompt_tokens > 200_000
+            input_rate = (
+                pricing.input_per_m_high
+                if use_high and getattr(pricing, "input_per_m_high", None) is not None
+                else pricing.input_per_m
+            )
+            output_rate = (
+                pricing.output_per_m_high
+                if use_high and getattr(pricing, "output_per_m_high", None) is not None
+                else pricing.output_per_m
+            )
+            cached_rate = (
+                pricing.cached_input_per_m_high
+                if use_high and getattr(pricing, "cached_input_per_m_high", None) is not None
+                else getattr(pricing, "cached_input_per_m", None)
+            )
+            if cached_rate is None:
+                cached_rate = input_rate
+            noncached_prompt = max(0, prompt_tokens - cached_tokens)
+            billed_output = completion_tokens + thinking_tokens
             total += (
-                bucket["prompt_tokens"] / 1_000_000.0 * pricing.input_per_m
-                + bucket["completion_tokens"] / 1_000_000.0 * pricing.output_per_m
+                noncached_prompt / 1_000_000.0 * input_rate
+                + cached_tokens / 1_000_000.0 * cached_rate
+                + billed_output / 1_000_000.0 * output_rate
             )
         return total
+
     pricing, _ = get_pricing("gemini-2.5-pro")
     return (
         usage.prompt_tokens / 1_000_000.0 * pricing.input_per_m

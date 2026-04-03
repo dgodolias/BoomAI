@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from ..core.config import settings
 from .estimator import ScanEstimate, compute_usage_cost_breakdown
 
 
@@ -90,12 +91,17 @@ def write_run_cost_report(
             "cost_breakdown": cost_breakdown,
         },
         "pricing_notes": {
-            "display_cost_is_multiplied": True,
+            "display_cost_is_multiplied": cost_breakdown.get("display_multiplier", 1.0) != 1.0,
             "display_multiplier": cost_breakdown.get("display_multiplier", 1.0),
             "raw_cost_usd": cost_breakdown.get("raw_total_cost_usd", 0.0),
             "display_cost_usd": cost_breakdown.get("display_total_cost_usd", 0.0),
+            "billing_currency": str(settings.billing_currency).upper(),
+            "usd_to_eur_rate": float(settings.usd_to_eur_rate),
+            "raw_cost_eur_approx": cost_breakdown.get("raw_total_cost_usd", 0.0) * float(settings.usd_to_eur_rate),
+            "display_cost_eur_approx": cost_breakdown.get("display_total_cost_usd", 0.0) * float(settings.usd_to_eur_rate),
             "reference_urls": [
                 "https://ai.google.dev/gemini-api/docs/pricing",
+                "https://data.ecb.europa.eu/currency-converter",
                 "https://ai.google.dev/gemini-api/docs/models/gemini",
             ],
         },

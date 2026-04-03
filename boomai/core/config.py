@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     llm_model: str = "gemini-3.1-pro-preview"
     patch_llm_model: str = "gemini-3.1-flash-lite-preview"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/models"
+    billing_currency: str = "USD"
+    usd_to_eur_rate: float = 0.8677
+    cost_reporting_enabled: bool = True
     max_output_tokens: int = 32768
     llm_timeout: float = 300.0
 
