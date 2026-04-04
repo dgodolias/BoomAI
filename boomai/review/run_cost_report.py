@@ -10,8 +10,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from ..core.config import settings
-from ..core.google_pricing import get_pricing_catalog_metadata
-from .estimator import ScanEstimate, compute_usage_cost_breakdown
+from ..integrations.google.pricing_catalog_service import PricingCatalogService
+from .estimator import ScanEstimate
+from .services.cost_attribution import compute_usage_cost_breakdown
+
+pricing_catalog_service = PricingCatalogService()
 
 
 def _iso_now() -> str:
@@ -127,7 +130,7 @@ def write_run_cost_report(
     report_path = report_dir / f"{_safe_name(run_id)}-cost-report.json"
 
     cost_breakdown = compute_usage_cost_breakdown(usage)
-    pricing_catalog = get_pricing_catalog_metadata()
+    pricing_catalog = pricing_catalog_service.get_metadata()
     payload = {
         "schema_version": 2,
         "run_id": run_id,

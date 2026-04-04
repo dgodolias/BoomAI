@@ -10,10 +10,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from ..core.config import settings
 from ..core.policies import build_estimate_policy
-from ..core.google_pricing import ModelPricing, effective_rates, get_pricing
+from ..core.google_pricing import ModelPricing, get_pricing
 from .estimation_history import EstimateFeatures, get_record_count, learn_adjustment
+from ..presentation.estimate_output import format_estimate as present_estimate
 from .prompts import build_fix_system_prompt, build_plan_prompt, build_scan_system_prompt
 from .runtime_policy import (
     compute_patch_concurrency,
@@ -22,6 +22,10 @@ from .runtime_policy import (
     normalize_scan_output_tokens,
 )
 from .services.chunk_planner import ChunkPlanner
+from .services.cost_attribution import (
+    compute_usage_cost_breakdown as service_compute_usage_cost_breakdown,
+    format_actual_cost as service_format_actual_cost,
+)
 
 
 def _estimate_plan_billed_output_tokens(plan_output_tokens: int, chunk_count: int) -> tuple[int, int]:
@@ -334,214 +338,13 @@ def _event_cost(event: dict[str, object]) -> dict[str, float]:
 
 def compute_usage_cost_breakdown(usage) -> dict[str, object]:
     """Return raw and display cost attribution for a UsageStats object."""
-    request_events = list(getattr(usage, "request_events", []))
-    per_model: dict[str, dict[str, object]] = {}
-    total_input_cost = 0.0
-    total_cached_input_cost = 0.0
-    total_output_cost = 0.0
-    per_request: list[dict[str, object]] = []
-
-    for event in request_events:
-        if not isinstance(event, dict):
-            continue
-        model_name = str(event.get("model", "") or "")
-        stage_name = str(event.get("stage", "unknown") or "unknown")
-        pricing, known = get_pricing(model_name)
-        cost = _event_cost(event)
-        total_input_cost += cost["input_cost_usd"]
-        total_cached_input_cost += cost["cached_input_cost_usd"]
-        total_output_cost += cost["output_cost_usd"]
-
-        model_bucket = per_model.setdefault(
-            model_name,
-            {
-                "label": pricing.label,
-                "known_pricing": known,
-                "prompt_tokens": 0,
-                "noncached_prompt_tokens": 0,
-                "cached_prompt_tokens": 0,
-                "completion_tokens": 0,
-                "thinking_tokens": 0,
-                "billed_output_tokens": 0,
-                "api_calls": 0,
-                "input_cost_usd": 0.0,
-                "cached_input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "raw_cost_usd": 0.0,
-            },
-        )
-        for key in (
-            "prompt_tokens",
-            "noncached_prompt_tokens",
-            "cached_prompt_tokens",
-            "completion_tokens",
-            "thinking_tokens",
-            "billed_output_tokens",
-        ):
-            model_bucket[key] += int(cost[key])
-        model_bucket["api_calls"] += 1
-        model_bucket["input_cost_usd"] += cost["input_cost_usd"]
-        model_bucket["cached_input_cost_usd"] += cost["cached_input_cost_usd"]
-        model_bucket["output_cost_usd"] += cost["output_cost_usd"]
-        model_bucket["raw_cost_usd"] += cost["raw_cost_usd"]
-
-        per_request.append(
-            {
-                "stage": stage_name,
-                "model": model_name,
-                "request_label": str(event.get("request_label", "") or ""),
-                "prompt_tokens": int(cost["prompt_tokens"]),
-                "noncached_prompt_tokens": int(cost["noncached_prompt_tokens"]),
-                "cached_prompt_tokens": int(cost["cached_prompt_tokens"]),
-                "completion_tokens": int(cost["completion_tokens"]),
-                "thinking_tokens": int(cost["thinking_tokens"]),
-                "billed_output_tokens": int(cost["billed_output_tokens"]),
-                "input_cost_usd": cost["input_cost_usd"],
-                "cached_input_cost_usd": cost["cached_input_cost_usd"],
-                "output_cost_usd": cost["output_cost_usd"],
-                "raw_cost_usd": cost["raw_cost_usd"],
-            }
-        )
-
-    per_stage: dict[str, dict[str, object]] = {}
-    for event in request_events:
-        if not isinstance(event, dict):
-            continue
-        stage_name = str(event.get("stage", "unknown") or "unknown")
-        model_name = str(event.get("model", "") or "")
-        pricing, known = get_pricing(model_name)
-        cost = _event_cost(event)
-        stage_bucket = per_stage.setdefault(
-            stage_name,
-            {
-                "prompt_tokens": 0,
-                "noncached_prompt_tokens": 0,
-                "cached_prompt_tokens": 0,
-                "completion_tokens": 0,
-                "thinking_tokens": 0,
-                "billed_output_tokens": 0,
-                "api_calls": 0,
-                "input_cost_usd": 0.0,
-                "cached_input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "raw_cost_usd": 0.0,
-                "models": {},
-            },
-        )
-        for key in (
-            "prompt_tokens",
-            "noncached_prompt_tokens",
-            "cached_prompt_tokens",
-            "completion_tokens",
-            "thinking_tokens",
-            "billed_output_tokens",
-        ):
-            stage_bucket[key] += int(cost[key])
-        stage_bucket["api_calls"] += 1
-        stage_bucket["input_cost_usd"] += cost["input_cost_usd"]
-        stage_bucket["cached_input_cost_usd"] += cost["cached_input_cost_usd"]
-        stage_bucket["output_cost_usd"] += cost["output_cost_usd"]
-        stage_bucket["raw_cost_usd"] += cost["raw_cost_usd"]
-
-        stage_model_bucket = stage_bucket["models"].setdefault(
-            model_name,
-            {
-                "label": pricing.label,
-                "known_pricing": known,
-                "prompt_tokens": 0,
-                "noncached_prompt_tokens": 0,
-                "cached_prompt_tokens": 0,
-                "completion_tokens": 0,
-                "thinking_tokens": 0,
-                "billed_output_tokens": 0,
-                "api_calls": 0,
-                "input_cost_usd": 0.0,
-                "cached_input_cost_usd": 0.0,
-                "output_cost_usd": 0.0,
-                "raw_cost_usd": 0.0,
-            },
-        )
-        for key in (
-            "prompt_tokens",
-            "noncached_prompt_tokens",
-            "cached_prompt_tokens",
-            "completion_tokens",
-            "thinking_tokens",
-            "billed_output_tokens",
-        ):
-            stage_model_bucket[key] += int(cost[key])
-        stage_model_bucket["api_calls"] += 1
-        stage_model_bucket["input_cost_usd"] += cost["input_cost_usd"]
-        stage_model_bucket["cached_input_cost_usd"] += cost["cached_input_cost_usd"]
-        stage_model_bucket["output_cost_usd"] += cost["output_cost_usd"]
-        stage_model_bucket["raw_cost_usd"] += cost["raw_cost_usd"]
-
-    raw_cost = total_input_cost + total_cached_input_cost + total_output_cost
-    displayed_cost = raw_cost * build_estimate_policy().display_cost_multiplier
-    return {
-        "prompt_tokens": int(getattr(usage, "prompt_tokens", 0)),
-        "completion_tokens": int(getattr(usage, "completion_tokens", 0)),
-        "api_calls": int(getattr(usage, "api_calls", 0)),
-        "usage_metadata_totals": dict(getattr(usage, "usage_metadata_totals", {})),
-        "raw_input_cost_usd": total_input_cost,
-        "raw_cached_input_cost_usd": total_cached_input_cost,
-        "raw_output_cost_usd": total_output_cost,
-        "raw_total_cost_usd": raw_cost,
-        "display_multiplier": build_estimate_policy().display_cost_multiplier,
-        "display_total_cost_usd": displayed_cost,
-        "per_model": per_model,
-        "per_stage": per_stage,
-        "per_request": per_request,
-    }
+    return service_compute_usage_cost_breakdown(usage)
 
 
 def format_estimate(est: ScanEstimate) -> None:
-    sep = "-" * 42
-    print(f"\n  {sep}")
-    print("  Scan Estimate")
-    print(f"  {sep}")
-    print(f"    Profile:     {est.profile}")
-    print(f"    Model:       {est.model_label}")
-    print(f"    Patch model: {est.patch_model_label}")
-    print(f"    Files:       {est.file_count} files, {est.total_chars:,} chars")
-    print(f"    Chunks:      {est.chunk_count} (+ 1 planning call)")
-    print(f"    API calls:   ~{est.total_api_calls_low} -- {est.total_api_calls_high}")
-    print(f"    Est. input:  ~{_fmt_tokens(est.input_tokens_low)} -- {_fmt_tokens(est.input_tokens_high)} tokens")
-    print(f"    Est. output: ~{_fmt_tokens(est.output_tokens_low)} -- {_fmt_tokens(est.output_tokens_high)} tokens")
-    print(f"    Est. cost:   {_fmt_cost(est.cost_min)} -- {_fmt_cost(est.cost_max)}")
-    print(f"    Est. time:   ~{_fmt_time(est.time_min)} -- {_fmt_time(est.time_max)}")
-    if est.learned_samples:
-        learned_label = "lightly calibrated" if getattr(est, "learned_blended", False) else "calibrated"
-        print(f"    Learned:     {learned_label} from {est.learned_samples} past run(s)")
-    else:
-        remaining = max(0, 3 - int(getattr(est, "recorded_samples", 0)))
-        if remaining > 0:
-            print(
-                f"    Learned:     waiting for {remaining} more recorded run(s) "
-                f"(have {getattr(est, 'recorded_samples', 0)})"
-            )
-    if not est.is_known_model:
-        print("    Warning:     Unknown model -- using conservative estimate")
-    print(f"  {sep}\n")
+    present_estimate(est)
 
 
 def format_actual_cost(usage) -> str:
     """Format actual cost line using per-model token accounting."""
-    thinking_tokens = int(getattr(usage, "usage_metadata_totals", {}).get("thoughtsTokenCount", 0))
-    if not getattr(usage, "per_model", None):
-        pricing, _ = get_pricing("gemini-2.5-pro")
-        actual = (
-            usage.prompt_tokens / 1_000_000 * pricing.input_per_m
-            + usage.completion_tokens / 1_000_000 * pricing.output_per_m
-        )
-        actual *= build_estimate_policy().display_cost_multiplier
-    else:
-        breakdown = compute_usage_cost_breakdown(usage)
-        actual = float(breakdown["display_total_cost_usd"])
-    thinking_part = f" + {thinking_tokens:,} thinking" if thinking_tokens else ""
-    if str(settings.billing_currency).upper() == "EUR":
-        return (
-            f"  Actual: {usage.prompt_tokens:,} in + {usage.completion_tokens:,} out"
-            f"{thinking_part} = {_fmt_cost(actual)} (~{_fmt_eur(actual)})"
-        )
-    return f"  Actual: {usage.prompt_tokens:,} in + {usage.completion_tokens:,} out{thinking_part} = {_fmt_cost(actual)}"
+    return service_format_actual_cost(usage)

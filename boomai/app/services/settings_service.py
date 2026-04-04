@@ -4,10 +4,11 @@ import sys
 from pathlib import Path
 
 from ...core.config import settings
-from ...core.google_models import apply_runtime_models, get_runtime_models
+from ...integrations.google.models_catalog_service import ModelCatalogService
 
 GLOBAL_ENV_DIR = Path.home() / ".boomai"
 GLOBAL_ENV_FILE = GLOBAL_ENV_DIR / ".env"
+model_catalog_service = ModelCatalogService()
 
 
 def save_setting(env_key: str, value: str) -> None:
@@ -77,6 +78,6 @@ def set_model_role(role: str, *, mode: str, override: str = "") -> None:
 
 
 def refresh_runtime_model_catalog(*, force_refresh: bool = False):
-    runtime_models = get_runtime_models(force_refresh=force_refresh)
-    apply_runtime_models(runtime_models)
+    runtime_models = model_catalog_service.get_runtime_models(force_refresh=force_refresh)
+    model_catalog_service.apply_runtime_models(runtime_models)
     return runtime_models

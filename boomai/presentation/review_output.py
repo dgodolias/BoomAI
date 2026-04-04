@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ..core.models import ReviewSummary
-from ..review.estimator import format_actual_cost
+from ..review.services.cost_attribution import format_actual_cost
 
 
 def format_elapsed(seconds: float) -> str:

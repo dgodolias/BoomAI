@@ -15,6 +15,7 @@ from ..core.config import settings
 from ..core.google_models import RuntimeModels, build_generate_content_url
 from ..core.models import IssueSeed, ReviewComment, ReviewSummary, Severity, UsageStats
 from ..context.services import RelatedContextRetriever
+from ..integrations.google.gemini_client import GeminiClient
 from .pack_selector import select_prompt_pack_ids
 from .progress_history import ChunkProgressFeatures, record_chunk_elapsed
 from .prompts import (
@@ -38,10 +39,15 @@ from .runtime_policy import (
     normalize_scan_output_tokens as _normalize_scan_output_tokens,
 )
 from .services.chunk_planner import ChunkPlanner
+from .services import finding_policy as finding_policy_service
+from .services import patch_batch_generator as patch_batch_service
+from .services import response_parser as response_parser_service
+from .services import summary_synthesizer as summary_synthesizer_service
 
 logger = logging.getLogger(__name__)
 chunk_planner = ChunkPlanner()
 context_retriever = RelatedContextRetriever()
+gemini_client = GeminiClient()
 
 # Type alias for progress callback
 ProgressFn = Callable[[str], None] | None
@@ -115,40 +121,19 @@ async def _gemini_post(
 ) -> httpx.Response | None:
     """POST to Gemini API with retry on transient network errors."""
     max_retries = max_retries or get_http_max_retries()
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                return await client.post(
-                    url,
-                    headers={"Content-Type": "application/json"},
-                    json=payload,
-                )
-        except (
-            httpx.ConnectError,
-            httpx.TimeoutException,
-            httpx.ReadError,
-            httpx.ProtocolError,
-            httpx.RemoteProtocolError,
-        ) as e:
-            error_type = type(e).__name__
-            if attempt < max_retries - 1:
-                wait = 2 ** (attempt + 1)
-                if on_retry:
-                    on_retry(attempt + 1, f"{error_type}, retrying in {wait}s")
-                else:
-                    logger.warning(f"Gemini API attempt {attempt + 1} failed ({error_type}), retrying in {wait}s...")
-                await asyncio.sleep(wait)
-            else:
-                if on_retry:
-                    on_retry(attempt + 1, f"{error_type}, giving up after {max_retries} attempts")
-                else:
-                    logger.error(f"Gemini API failed after {max_retries} attempts: {error_type}")
-                return None
-    return None
+    return await gemini_client.post(
+        url=url,
+        payload=payload,
+        timeout=timeout,
+        max_retries=max_retries,
+        on_retry=on_retry,
+    )
 
 
 def _sanitize_json(text: str) -> str:
     """Fix common Gemini JSON issues: trailing commas."""
+    return response_parser_service.sanitize_json(text)
+
     text = re.sub(r',\s*([}\]])', r'\1', text)
     return text
 
@@ -161,6 +146,8 @@ def _recover_truncated_json(text: str) -> dict | None:
     out each individual finding object one at a time, stopping at the first
     truncated/invalid object.  Returns a dict or None if nothing recoverable.
     """
+    return response_parser_service.recover_truncated_json(text)
+
     import re
 
     # Extract summary — only if the string is fully closed
@@ -210,6 +197,13 @@ def _parse_review_response(text: str) -> tuple[ReviewSummary, str]:
     - "recovered": salvaged partial JSON after truncation
     - "failed": could not recover a usable payload
     """
+    return response_parser_service.parse_review_response(
+        text,
+        debug=settings.scan_debug,
+        logger=logger,
+        fallback_review=_fallback_review,
+    )
+
     def _build_summary(data: dict) -> ReviewSummary:
         comments = []
         for f in data.get("findings", []):
@@ -272,6 +266,8 @@ def _parse_review_response(text: str) -> tuple[ReviewSummary, str]:
 
 def _is_fix_worthy(finding: ReviewComment) -> bool:
     """Return True when a finding should get a dedicated patch-generation pass."""
+    return finding_policy_service.is_fix_worthy(finding)
+
     lowered = finding.body.lower()
     if finding.fixable is False:
         return False
@@ -337,6 +333,8 @@ def _is_fix_worthy(finding: ReviewComment) -> bool:
 
 def _is_high_value_finding(finding: ReviewComment) -> bool:
     """Filter out low-signal findings so final output stays bug-first."""
+    return finding_policy_service.is_high_value_finding(finding)
+
     lowered = finding.body.lower()
     high_value_categories = {
         "correctness",
@@ -407,6 +405,8 @@ def _is_high_value_finding(finding: ReviewComment) -> bool:
 
 def _filter_findings(review: ReviewSummary) -> ReviewSummary:
     """Keep final findings focused on meaningful bugs and actionable risks."""
+    return finding_policy_service.filter_findings(review)
+
     kept = [finding for finding in review.findings if _is_high_value_finding(finding)]
     if len(kept) == len(review.findings):
         return review
@@ -542,6 +542,13 @@ def _combine_review_summaries(
     force_recovered_text: bool = False,
 ) -> str:
     """Combine summaries while suppressing internal placeholders."""
+    return summary_synthesizer_service.combine_review_summaries(
+        summaries,
+        findings=findings,
+        fallback=fallback,
+        force_recovered_text=force_recovered_text,
+    )
+
     informative = [
         summary for summary in summaries
         if summary and not _is_unavailable_summary(summary)
@@ -564,6 +571,8 @@ def _combine_review_summaries(
 
 def _fix_priority(finding: ReviewComment) -> tuple[int, int]:
     """Sort findings so the most valuable auto-fixes run first."""
+    return patch_batch_service.fix_priority(finding)
+
     severity_score = {
         Severity.CRITICAL: 4,
         Severity.HIGH: 3,
@@ -586,6 +595,8 @@ def _chunk_split_depth(label: str) -> int:
 
 def _extract_patch_context(content: str, line: int) -> tuple[str, str]:
     """Return a bounded line window around the finding for patch generation."""
+    return patch_batch_service.extract_patch_context(content, line)
+
     lines = content.replace("\r\n", "\n").split("\n")
     if not lines:
         return ("whole file", content)
@@ -602,6 +613,8 @@ def _extract_patch_context_for_findings(
     findings: list[ReviewComment],
 ) -> tuple[str, str]:
     """Return one bounded line window covering a local patch set."""
+    return patch_batch_service.extract_patch_context_for_findings(content, findings)
+
     lines = content.replace("\r\n", "\n").split("\n")
     if not lines or not findings:
         return ("whole file", content)
@@ -617,6 +630,8 @@ def _extract_patch_context_for_findings(
 
 def _group_actionable_findings(findings: list[ReviewComment]) -> list[list[ReviewComment]]:
     """Group findings by file and nearby patch-set so one API call can fix several."""
+    return patch_batch_service.group_actionable_findings(findings)
+
     if not findings:
         return []
 
@@ -678,6 +693,8 @@ def _parse_fix_response(
     default_findings: list[ReviewComment],
 ) -> list[tuple[list[int], ReviewComment]]:
     """Parse grouped patch response into indexed edits."""
+    return response_parser_service.parse_fix_response(text, default_findings)
+
     try:
         sanitized = _sanitize_json(text)
         decoder = json.JSONDecoder()

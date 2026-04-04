@@ -9,11 +9,12 @@ from ...analysis.languages import detect_languages, filter_reviewable_files
 from ...analysis.services.static_analysis_service import StaticAnalysisService
 from ...context.indexer import build_code_index
 from ...core.config import settings
-from ...core.google_models import apply_runtime_models, get_runtime_models
+from ...integrations.google.models_catalog_service import ModelCatalogService
+from ...presentation.estimate_output import format_estimate
 from ...presentation.progress import ScanProgressDisplay
 from ...presentation.review_output import print_review
 from ...review.estimation_history import record_run
-from ...review.estimator import estimate_scan, format_estimate, get_pricing
+from ...review.estimator import estimate_scan, get_pricing
 from ...review.run_cost_report import write_run_cost_report
 from ...review.services.review_workflow import ReviewWorkflow
 from .file_selection_service import collect_files, read_file_contents, report_unreadable_files, select_target_files
@@ -26,6 +27,7 @@ class FixWorkflow:
     """Owns the full CLI fix lifecycle without embedding it in cli.py."""
 
     def __init__(self) -> None:
+        self.model_catalog_service = ModelCatalogService()
         self.static_analysis_service = StaticAnalysisService()
         self.review_workflow = ReviewWorkflow()
 
@@ -33,8 +35,8 @@ class FixWorkflow:
         require_api_key()
         profile = "deep" if getattr(args, "deep", False) else getattr(args, "profile", settings.scan_profile)
         apply_scan_profile(profile)
-        runtime_models = get_runtime_models()
-        apply_runtime_models(runtime_models)
+        runtime_models = self.model_catalog_service.get_runtime_models()
+        self.model_catalog_service.apply_runtime_models(runtime_models)
         detailed_cost_report_enabled = settings.cost_reporting_enabled
         if getattr(args, "cost_report", False):
             detailed_cost_report_enabled = True

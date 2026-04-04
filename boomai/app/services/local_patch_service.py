@@ -4,6 +4,24 @@ import difflib
 import os
 
 
+def detect_newline_style(content: str) -> str:
+    if "\r\n" in content:
+        return "\r\n"
+    if "\r" in content:
+        return "\r"
+    return "\n"
+
+
+def normalize_newlines(content: str) -> str:
+    return content.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def restore_newlines(content: str, newline_style: str) -> str:
+    if newline_style == "\n":
+        return content
+    return content.replace("\n", newline_style)
+
+
 def is_natural_language(suggestion: str) -> bool:
     s = suggestion.strip()
     instruction_starters = (
@@ -75,9 +93,9 @@ def line_match(content: str, old_code: str, hint_line: int) -> tuple[int, int] |
 
 
 def find_and_replace(content: str, old_code: str, new_code: str, hint_line: int) -> tuple[str, bool]:
-    content = content.replace("\r\n", "\n")
-    old_code = old_code.replace("\r\n", "\n")
-    new_code = new_code.replace("\r\n", "\n")
+    content = normalize_newlines(content)
+    old_code = normalize_newlines(old_code)
+    new_code = normalize_newlines(new_code)
 
     if old_code in content and content.count(old_code) == 1:
         return content.replace(old_code, new_code, 1), True
@@ -119,8 +137,10 @@ def apply_local(findings: list, repo_path: str = ".", file_filter: str | None = 
             print(f"  SKIP {filepath} (file not found locally)")
             continue
 
-        with open(full_path, "r", encoding="utf-8") as handle:
-            content = handle.read().replace("\r\n", "\n")
+        with open(full_path, "r", encoding="utf-8", newline="") as handle:
+            raw_content = handle.read()
+        newline_style = detect_newline_style(raw_content)
+        content = normalize_newlines(raw_content)
 
         file_applied = 0
         for finding in sorted(file_findings, key=lambda item: item.line, reverse=True):
@@ -131,8 +151,8 @@ def apply_local(findings: list, repo_path: str = ".", file_filter: str | None = 
                 print(f"  SKIP {filepath}:{finding.line} (code not found)")
 
         if file_applied:
-            with open(full_path, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(content)
+            with open(full_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write(restore_newlines(content, newline_style))
             print(f"  Applied {file_applied} fix(es) to {filepath}")
             applied += file_applied
 
