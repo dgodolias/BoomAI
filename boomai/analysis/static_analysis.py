@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 from ..core.models import Finding, FindingSource, Severity
+from ..core.policies import build_static_analysis_policy
 from .languages import LANGUAGES
 
 logger = logging.getLogger(__name__)
@@ -470,6 +471,7 @@ def prioritize_findings(
     findings: list[Finding], max_count: int = 20
 ) -> list[Finding]:
     """Return deduped, severity-aware findings with file/rule diversity."""
+    static_analysis_policy = build_static_analysis_policy()
     deduped = _dedupe_findings(findings)
     if len(deduped) <= max_count:
         return sorted(deduped, key=_finding_sort_key)
@@ -480,8 +482,8 @@ def prioritize_findings(
     selected = _select_diverse(
         sorted_findings,
         max_count=max_count,
-        max_per_file=2,
-        max_per_rule=3,
+        max_per_file=static_analysis_policy.initial_file_cap,
+        max_per_rule=static_analysis_policy.initial_rule_family_cap,
     )
 
     # Second pass relaxes quotas so we do not throw away important findings.
@@ -489,8 +491,8 @@ def prioritize_findings(
         selected = _select_diverse(
             sorted_findings,
             max_count=max_count,
-            max_per_file=4,
-            max_per_rule=6,
+            max_per_file=static_analysis_policy.relaxed_file_cap,
+            max_per_rule=static_analysis_policy.relaxed_rule_family_cap,
             selected=selected,
         )
 

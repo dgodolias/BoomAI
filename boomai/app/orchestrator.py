@@ -5,14 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from ..analysis.services.finding_prioritizer import FindingPrioritizer
 from ..analysis.static_analysis import (
-    prioritize_findings,
     run_devskim,
     run_gitleaks,
     run_roslyn_build,
     run_semgrep,
 )
 from ..core.models import Finding, IssueSeed
+from ..core.policies import build_static_analysis_policy
 
 ProgressFn = Callable[[str], None] | None
 
@@ -36,6 +37,8 @@ def run_static_analysis_suite(
     on_progress: ProgressFn = None,
 ) -> StaticAnalysisResult:
     """Run all configured static analyzers and normalize their findings."""
+    prioritizer = FindingPrioritizer()
+    static_analysis_policy = build_static_analysis_policy()
     tools = [
         ("Semgrep", lambda: run_semgrep(repo_path, detected_languages, reviewable_files)),
         ("DevSkim", lambda: run_devskim(repo_path, reviewable_files)),
@@ -55,7 +58,10 @@ def run_static_analysis_suite(
 
     prioritized = [
         IssueSeed(**finding.model_dump(exclude={"suggestion"}))
-        for finding in prioritize_findings(all_findings, max_count=40)
+        for finding in prioritizer.prioritize(
+            all_findings,
+            max_count=static_analysis_policy.max_issue_seeds,
+        )
     ]
 
     return StaticAnalysisResult(

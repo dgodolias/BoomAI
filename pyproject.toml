@@ -17,5 +17,10 @@ dependencies = [
 [project.scripts]
 boomai = "boomai.cli:main"
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8,<9",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["boomai"]

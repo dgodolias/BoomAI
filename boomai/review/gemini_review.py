@@ -3,9 +3,10 @@
 import asyncio
 import json
 import logging
+import posixpath
 import re
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Callable
 
 import httpx
@@ -13,6 +14,7 @@ import httpx
 from ..core.config import settings
 from ..core.google_models import RuntimeModels, build_generate_content_url
 from ..core.models import IssueSeed, ReviewComment, ReviewSummary, Severity, UsageStats
+from ..context.services import RelatedContextRetriever
 from .pack_selector import select_prompt_pack_ids
 from .progress_history import ChunkProgressFeatures, record_chunk_elapsed
 from .prompts import (
@@ -21,8 +23,25 @@ from .prompts import (
     build_scan_response_schema,
     build_fix_response_schema, build_fix_system_prompt, build_fix_user_message,
 )
+from .runtime_policy import (
+    build_generation_config as _build_generation_config,
+    compute_effective_timeout as _compute_effective_timeout,
+    compute_patch_concurrency as _compute_patch_concurrency,
+    compute_scan_concurrency as _compute_scan_concurrency,
+    compute_scan_output_tokens as _compute_scan_output_tokens,
+    effective_scan_char_budget as _effective_scan_char_budget,
+    get_heartbeat_interval_seconds,
+    get_http_max_retries,
+    is_flash_model as _is_flash_model,
+    is_gemini3_family as _is_gemini3_family,
+    is_pro_model as _is_pro_model,
+    normalize_scan_output_tokens as _normalize_scan_output_tokens,
+)
+from .services.chunk_planner import ChunkPlanner
 
 logger = logging.getLogger(__name__)
+chunk_planner = ChunkPlanner()
+context_retriever = RelatedContextRetriever()
 
 # Type alias for progress callback
 ProgressFn = Callable[[str], None] | None
@@ -64,11 +83,12 @@ class _ModelChain:
 
 
 async def _with_heartbeat(
-    coro, emit: ProgressFn, label: str = "Waiting for Gemini", interval: int = 10,
+    coro, emit: ProgressFn, label: str = "Waiting for Gemini", interval: int | None = None,
 ):
     """Run *coro* while printing elapsed time every *interval* seconds."""
     if emit is None:
         return await coro
+    interval = interval or get_heartbeat_interval_seconds()
     start = time.monotonic()
 
     async def _beat():
@@ -90,10 +110,11 @@ async def _with_heartbeat(
 
 async def _gemini_post(
     url: str, payload: dict, timeout: float,
-    max_retries: int = 3,
+    max_retries: int | None = None,
     on_retry: Callable[[int, str], None] | None = None,
 ) -> httpx.Response | None:
     """POST to Gemini API with retry on transient network errors."""
+    max_retries = max_retries or get_http_max_retries()
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -130,119 +151,6 @@ def _sanitize_json(text: str) -> str:
     """Fix common Gemini JSON issues: trailing commas."""
     text = re.sub(r',\s*([}\]])', r'\1', text)
     return text
-
-
-def _compute_effective_timeout(chunk_chars: int, file_count: int) -> float:
-    """Scale chunk timeout with payload size instead of file count alone."""
-    timeout = settings.scan_timeout
-    if file_count == 1:
-        timeout *= 2
-    if chunk_chars >= 100_000:
-        timeout = max(timeout, settings.scan_timeout + 180)
-    elif chunk_chars >= 60_000:
-        timeout = max(timeout, settings.scan_timeout + 90)
-    return timeout
-
-
-def _compute_scan_output_tokens(
-    chunk_chars: int,
-    file_count: int,
-    issue_seed_count: int = 0,
-) -> int:
-    """Choose a tighter output cap based on chunk complexity.
-
-    Keeps the configured setting as a hard upper bound while avoiding
-    a huge maxOutputTokens budget for small scans.
-    """
-    cap = 4096
-    if chunk_chars >= 50_000 or file_count >= 6:
-        cap = 8192
-    if chunk_chars >= 100_000 or file_count >= 10 or issue_seed_count >= 8:
-        cap = 16384
-    if chunk_chars >= 200_000 or file_count >= 20 or issue_seed_count >= 16:
-        cap = 24576
-    if chunk_chars >= 320_000 or file_count >= 35 or issue_seed_count >= 24:
-        cap = 32768
-    return min(settings.scan_output_tokens, cap)
-
-
-def _effective_scan_char_budget(char_budget: int) -> int:
-    """Reserve room for prompt wrappers, issue seeds, and related snippets."""
-    return max(40_000, char_budget - settings.scan_chunk_reserved_chars)
-
-
-def _compute_scan_concurrency(model_name: str, chunk_count: int) -> int:
-    """Choose safer concurrency for pro models and higher throughput for flash."""
-    lowered = model_name.lower()
-    if "flash" in lowered:
-        limit = settings.scan_flash_max_concurrency
-        if chunk_count >= 12:
-            limit = min(limit, 3)
-        return max(1, limit)
-
-    limit = settings.scan_pro_max_concurrency
-    if chunk_count <= 3:
-        limit = min(limit + 1, settings.scan_flash_max_concurrency)
-    return max(1, limit)
-
-
-def _compute_patch_concurrency(model_name: str, patch_count: int) -> int:
-    """Use more parallelism for flash patch generation, less for pro."""
-    lowered = model_name.lower()
-    limit = settings.patch_max_concurrency
-    if "flash" not in lowered:
-        limit = min(limit, 2)
-    if patch_count <= 2:
-        limit = min(limit, patch_count)
-    return max(1, limit)
-
-
-def _is_gemini3_family(model_name: str) -> bool:
-    lowered = model_name.lower()
-    return "gemini-3" in lowered or "gemini-3.1" in lowered
-
-
-def _is_flash_model(model_name: str) -> bool:
-    return "flash" in model_name.lower()
-
-
-def _is_pro_model(model_name: str) -> bool:
-    lowered = model_name.lower()
-    return "pro" in lowered and "flash" not in lowered
-
-
-def _normalize_scan_output_tokens(model_name: str, requested_output_tokens: int) -> int:
-    """Leave enough output headroom for Gemini 3 Pro structured JSON."""
-    effective = max(1, int(requested_output_tokens))
-    if _is_gemini3_family(model_name) and _is_pro_model(model_name):
-        effective = max(effective, settings.scan_pro_min_output_tokens)
-    return min(settings.scan_output_tokens, effective)
-
-
-def _build_generation_config(
-    model_name: str,
-    max_output_tokens: int,
-    response_json_schema: dict | None = None,
-) -> dict:
-    """Build generation config with model-specific stability controls."""
-    config = {
-        "maxOutputTokens": max_output_tokens,
-        "temperature": 0.1,
-        "responseMimeType": "application/json",
-    }
-    if response_json_schema is not None:
-        config["responseJsonSchema"] = response_json_schema
-
-    lowered = model_name.lower()
-    if _is_gemini3_family(model_name):
-        if _is_flash_model(model_name):
-            config["thinkingConfig"] = {"thinkingLevel": settings.gemini3_flash_thinking_level}
-        elif _is_pro_model(model_name):
-            config["thinkingConfig"] = {"thinkingLevel": settings.gemini3_pro_thinking_level}
-    elif "flash" in lowered:
-        config["thinkingConfig"] = {"thinkingBudget": 0}
-
-    return config
 
 
 def _recover_truncated_json(text: str) -> dict | None:
@@ -870,9 +778,7 @@ async def _generate_fixes_for_group(
     related_snippets = []
 
     if code_index is not None:
-        from ..context.retriever import retrieve_related_context
-
-        retrieval = retrieve_related_context(
+        retrieval = context_retriever.retrieve(
             primary_files=[target_file],
             repo_file_map=repo_file_map,
             code_index=code_index,
@@ -1287,6 +1193,8 @@ def _chunk_files(
     char_budget: int,
 ) -> list[list[tuple[str, str]]]:
     """Split files into chunks that fit within the character budget."""
+    return chunk_planner.chunk_files(file_contents, char_budget)
+
     effective_budget = _effective_scan_char_budget(char_budget)
     chunks: list[list[tuple[str, str]]] = []
     current_chunk: list[tuple[str, str]] = []
@@ -1318,6 +1226,8 @@ def _chunk_files(
 
 def _build_numbered_section_content(lines: list[str], start: int, end: int) -> str:
     """Build a numbered line window so line references stay meaningful."""
+    return chunk_planner.build_numbered_section_content(lines, start, end)
+
     numbered = [
         f"{line_no:5d}: {line}"
         for line_no, line in enumerate(lines[start:end], start=start + 1)
@@ -1333,6 +1243,13 @@ def _split_single_file_into_sections(
     overlap_lines: int = 30,
 ) -> list[tuple[str, list[tuple[str, str]]]]:
     """Split one large file into overlapping numbered sections."""
+    return chunk_planner.split_single_file_into_sections(
+        path,
+        content,
+        target_chars=target_chars,
+        overlap_lines=overlap_lines,
+    )
+
     lines = content.replace("\r\n", "\n").split("\n")
     if not lines:
         return [(f"{path}:1-1", [(path, content)])]
@@ -1389,8 +1306,6 @@ async def _scan_chunk(
     related_snippets = []
     chunk_issue_seeds = []
     if repo_file_map is not None:
-        from ..context.retriever import retrieve_related_context
-
         max_snippets = 8
         max_snippet_chars = 12000
         if len(file_contents) >= 18:
@@ -1410,7 +1325,7 @@ async def _scan_chunk(
             max_snippet_chars = max_snippet_chars_override
 
         if max_snippets > 0 or issue_seed_limit != 0:
-            retrieval = retrieve_related_context(
+            retrieval = context_retriever.retrieve(
                 primary_files=[path for path, _ in file_contents],
                 repo_file_map=repo_file_map,
                 code_index=code_index,

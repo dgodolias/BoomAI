@@ -11,19 +11,17 @@ import math
 from dataclasses import dataclass
 
 from ..core.config import settings
+from ..core.policies import build_estimate_policy
 from ..core.google_pricing import ModelPricing, effective_rates, get_pricing
-from .estimation_history import EstimateFeatures, learn_adjustment
-
-CHARS_PER_TOKEN = 3.7
-PATCH_OUTPUT_RATIO_LOW = 0.05
-PATCH_OUTPUT_RATIO_HIGH = 0.18
-
-_PLAN_TIME_S = 15.0
-_PRO_TIME_PER_CALL_S = 120.0
-_FLASH_TIME_PER_CALL_S = 30.0
-_PRO_PATCH_TIME_PER_CALL_S = 35.0
-_FLASH_PATCH_TIME_PER_CALL_S = 12.0
-_DISPLAY_COST_MULTIPLIER = 1.0
+from .estimation_history import EstimateFeatures, get_record_count, learn_adjustment
+from .prompts import build_fix_system_prompt, build_plan_prompt, build_scan_system_prompt
+from .runtime_policy import (
+    compute_patch_concurrency,
+    compute_scan_concurrency,
+    compute_scan_output_tokens,
+    normalize_scan_output_tokens,
+)
+from .services.chunk_planner import ChunkPlanner
 
 
 def _estimate_plan_billed_output_tokens(plan_output_tokens: int, chunk_count: int) -> tuple[int, int]:
@@ -123,21 +121,10 @@ def estimate_scan(
     patch_model_label: str | None = None,
 ) -> ScanEstimate:
     """Estimate cost and time for the full two-stage scan."""
-    from boomai.review.gemini_review import (
-        _chunk_files,
-        _compute_patch_concurrency,
-        _compute_scan_concurrency,
-        _compute_scan_output_tokens,
-        _normalize_scan_output_tokens,
-    )
-    from boomai.review.prompts import (
-        build_fix_system_prompt,
-        build_plan_prompt,
-        build_scan_system_prompt,
-    )
-
+    estimate_policy = build_estimate_policy()
+    chunk_planner = ChunkPlanner()
     total_chars = sum(len(c) for _, c in file_contents)
-    chunks = _chunk_files(file_contents, max_scan_chars)
+    chunks = chunk_planner.chunk_files(file_contents, max_scan_chars)
     chunk_count = len(chunks)
 
     langs = languages or []
@@ -145,14 +132,14 @@ def estimate_scan(
     plan_system_chars = len(build_plan_prompt(max_scan_chars))
     fix_system_chars = len(build_fix_system_prompt())
 
-    plan_input = int(plan_system_chars / CHARS_PER_TOKEN)
+    plan_input = int(plan_system_chars / estimate_policy.chars_per_token)
     scan_input = 0
     scan_output_low, scan_output_high = _estimate_plan_billed_output_tokens(plan_output_tokens, chunk_count)
     for chunk in chunks:
         chunk_chars = sum(len(c) for _, c in chunk)
-        scan_input += int((scan_system_chars + chunk_chars + 300) / CHARS_PER_TOKEN)
-        requested_chunk_cap = _compute_scan_output_tokens(chunk_chars, len(chunk))
-        chunk_cap = _normalize_scan_output_tokens(model, requested_chunk_cap)
+        scan_input += int((scan_system_chars + chunk_chars + 300) / estimate_policy.chars_per_token)
+        requested_chunk_cap = compute_scan_output_tokens(chunk_chars, len(chunk))
+        chunk_cap = normalize_scan_output_tokens(model, requested_chunk_cap)
         billed_low, billed_high = _estimate_scan_billed_output_tokens(
             model,
             chunk_cap,
@@ -174,20 +161,20 @@ def estimate_scan(
     patch_calls_high = max(patch_calls_low, math.ceil(base_patch_calls_high * patch_multiplier))
     patch_prompt_chars_low = fix_system_chars + 4_500
     patch_prompt_chars_high = fix_system_chars + 10_500
-    patch_input_low = int((patch_calls_low * patch_prompt_chars_low) / CHARS_PER_TOKEN)
-    patch_input_high = int((patch_calls_high * patch_prompt_chars_high) / CHARS_PER_TOKEN)
+    patch_input_low = int((patch_calls_low * patch_prompt_chars_low) / estimate_policy.chars_per_token)
+    patch_input_high = int((patch_calls_high * patch_prompt_chars_high) / estimate_policy.chars_per_token)
     patch_output_cap = min(scan_output_tokens, 4096)
     patch_output_low = _estimate_patch_output_tokens(
         patch_model,
         patch_output_cap,
         patch_calls_low,
-        PATCH_OUTPUT_RATIO_LOW,
+        estimate_policy.patch_output_ratio_low,
     )
     patch_output_high = _estimate_patch_output_tokens(
         patch_model,
         patch_output_cap,
         patch_calls_high,
-        PATCH_OUTPUT_RATIO_HIGH,
+        estimate_policy.patch_output_ratio_high,
     )
 
     total_input_low = plan_input + scan_input + patch_input_low
@@ -210,15 +197,23 @@ def estimate_scan(
         + patch_output_high / 1_000_000 * patch_pricing.output_per_m
     )
 
-    scan_per_call = _FLASH_TIME_PER_CALL_S if "flash" in model.lower() else _PRO_TIME_PER_CALL_S
-    patch_per_call = _FLASH_PATCH_TIME_PER_CALL_S if "flash" in patch_model.lower() else _PRO_PATCH_TIME_PER_CALL_S
-    scan_concurrency = _compute_scan_concurrency(model, chunk_count)
-    patch_concurrency = _compute_patch_concurrency(patch_model, patch_calls_high)
+    scan_per_call = (
+        estimate_policy.flash_time_per_call_seconds
+        if "flash" in model.lower()
+        else estimate_policy.pro_time_per_call_seconds
+    )
+    patch_per_call = (
+        estimate_policy.flash_patch_time_per_call_seconds
+        if "flash" in patch_model.lower()
+        else estimate_policy.pro_patch_time_per_call_seconds
+    )
+    scan_concurrency = compute_scan_concurrency(model, chunk_count)
+    patch_concurrency = compute_patch_concurrency(patch_model, patch_calls_high)
     scan_batches = math.ceil(chunk_count / scan_concurrency)
     patch_batches_low = math.ceil(patch_calls_low / patch_concurrency)
     patch_batches_high = math.ceil(patch_calls_high / patch_concurrency)
-    time_min = _PLAN_TIME_S + scan_batches * scan_per_call * 0.35 + patch_batches_low * patch_per_call
-    time_max = _PLAN_TIME_S + scan_batches * scan_per_call + patch_batches_high * patch_per_call
+    time_min = estimate_policy.plan_time_seconds + scan_batches * scan_per_call * 0.35 + patch_batches_low * patch_per_call
+    time_max = estimate_policy.plan_time_seconds + scan_batches * scan_per_call + patch_batches_high * patch_per_call
     base_cost_mid = (cost_min + cost_max) / 2.0
     base_time_mid = (time_min + time_max) / 2.0
     features = EstimateFeatures(
@@ -247,7 +242,6 @@ def estimate_scan(
         learned_blended = learned.blended
         recorded_samples = learned.samples
     else:
-        from .estimation_history import get_record_count
         recorded_samples = get_record_count()
 
     return ScanEstimate(
@@ -483,7 +477,7 @@ def compute_usage_cost_breakdown(usage) -> dict[str, object]:
         stage_model_bucket["raw_cost_usd"] += cost["raw_cost_usd"]
 
     raw_cost = total_input_cost + total_cached_input_cost + total_output_cost
-    displayed_cost = raw_cost * _DISPLAY_COST_MULTIPLIER
+    displayed_cost = raw_cost * build_estimate_policy().display_cost_multiplier
     return {
         "prompt_tokens": int(getattr(usage, "prompt_tokens", 0)),
         "completion_tokens": int(getattr(usage, "completion_tokens", 0)),
@@ -493,7 +487,7 @@ def compute_usage_cost_breakdown(usage) -> dict[str, object]:
         "raw_cached_input_cost_usd": total_cached_input_cost,
         "raw_output_cost_usd": total_output_cost,
         "raw_total_cost_usd": raw_cost,
-        "display_multiplier": _DISPLAY_COST_MULTIPLIER,
+        "display_multiplier": build_estimate_policy().display_cost_multiplier,
         "display_total_cost_usd": displayed_cost,
         "per_model": per_model,
         "per_stage": per_stage,
@@ -540,7 +534,7 @@ def format_actual_cost(usage) -> str:
             usage.prompt_tokens / 1_000_000 * pricing.input_per_m
             + usage.completion_tokens / 1_000_000 * pricing.output_per_m
         )
-        actual *= _DISPLAY_COST_MULTIPLIER
+        actual *= build_estimate_policy().display_cost_multiplier
     else:
         breakdown = compute_usage_cost_breakdown(usage)
         actual = float(breakdown["display_total_cost_usd"])

@@ -6,6 +6,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 
+from ..core.policies import build_retrieval_policy
 from ..core.models import IssueSeed
 from .indexer import CodeIndex, SymbolDefinition
 
@@ -112,11 +113,19 @@ def retrieve_related_context(
     repo_file_map: dict[str, str],
     code_index: CodeIndex | None,
     issue_seeds: list[IssueSeed] | None = None,
-    max_issue_seeds: int = 12,
-    max_snippets: int = 10,
-    max_snippet_chars: int = 12000,
+    max_issue_seeds: int | None = None,
+    max_snippets: int | None = None,
+    max_snippet_chars: int | None = None,
 ) -> RetrievalResult:
     """Retrieve static issue seeds and related cross-file snippets."""
+    retrieval_policy = build_retrieval_policy()
+    max_issue_seeds = retrieval_policy.max_issue_seeds if max_issue_seeds is None else int(max_issue_seeds)
+    max_snippets = retrieval_policy.max_snippets if max_snippets is None else int(max_snippets)
+    max_snippet_chars = (
+        retrieval_policy.max_snippet_chars
+        if max_snippet_chars is None
+        else int(max_snippet_chars)
+    )
     issue_seeds = issue_seeds or []
     primary_set = set(primary_files)
 
