@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BoomAI</title>
+    <link rel="stylesheet" href="css/theme.css">
+    <link rel="stylesheet" href="css/layout.css">
+    <link rel="stylesheet" href="css/components.css">
+    <link rel="stylesheet" href="css/animations.css">
+</head>
+<body>
+<div class="app">
+
+    <!-- ═══════════ SCREEN 1: WELCOME ═══════════ -->
+    <section id="screen-welcome" class="screen active">
+        <div class="stars-container">
+            <div class="star"></div><div class="star"></div><div class="star"></div>
+            <div class="star"></div><div class="star"></div><div class="star"></div>
+            <div class="star"></div><div class="star"></div><div class="star"></div>
+            <div class="star"></div>
+        </div>
+        <div class="centered" style="position:relative; z-index:1;">
+            <img src="assets/logo.png" class="welcome-logo" style="height:80px; margin-bottom:12px;" alt="BoomCorp">
+            <h1 class="logo-shimmer" style="font-family:var(--font-heading); font-size:48px; margin-bottom:6px;">
+                BOOM AI
+            </h1>
+            <p style="color:var(--text-secondary); margin-bottom:40px; font-size:15px;">
+                AI-powered code fixer for C# / Unity
+            </p>
+
+            <div style="display:flex; align-items:center; gap:8px; margin-bottom:24px;">
+                <span class="status-dot" id="api-status-dot"></span>
+                <span style="font-size:12px; color:var(--text-dim);" id="api-status-text"></span>
+            </div>
+
+            <div id="api-key-setup" style="display:none; width:100%; max-width:420px; margin-bottom:24px;">
+                <p style="font-size:13px; color:var(--text-secondary); margin-bottom:8px;">
+                    Enter your Gemini API key to get started
+                </p>
+                <div style="display:flex; gap:8px;">
+                    <input type="password" id="api-key-input" class="input-field"
+                           placeholder="Paste your API key here...">
+                    <button class="btn btn-primary" onclick="App.saveApiKey()">Save</button>
+                </div>
+                <p style="font-size:11px; color:var(--text-dim); margin-top:6px;">
+                    Get a key at <span style="color:var(--accent-pink);">aistudio.google.com/apikey</span>
+                </p>
+            </div>
+
+            <button class="btn btn-primary btn-large" onclick="App.openFolder()" id="btn-open-folder">
+                Open Project Folder
+            </button>
+
+            <div id="recent-projects" style="margin-top:32px; width:100%; max-width:500px;"></div>
+        </div>
+    </section>
+
+    <!-- ═══════════ SCREEN 2: FILE BROWSER ═══════════ -->
+    <section id="screen-browser" class="screen">
+        <div class="header">
+            <div>
+                <span class="header-back" onclick="App.goTo('welcome')">&#8592; Back</span>
+            </div>
+            <div class="header-title" id="project-name"></div>
+            <div style="width:60px;"></div>
+        </div>
+
+        <div class="split">
+            <!-- Left: File tree -->
+            <div class="split-left">
+                <div class="tree-toolbar">
+                    <span class="tree-count" id="file-count-label">0 files selected</span>
+                    <div class="tree-actions">
+                        <button onclick="FileBrowser.selectAll()">Select All</button>
+                        <button onclick="FileBrowser.selectNone()">Deselect All</button>
+                        <button onclick="FileBrowser.selectReviewable()">Reviewable Only</button>
+                    </div>
+                </div>
+                <div class="file-tree" id="file-tree"></div>
+            </div>
+
+            <!-- Right: Settings -->
+            <div class="split-right">
+                <div class="section-title">Scan Profile</div>
+                <div class="pill-group" style="margin-bottom:24px;">
+                    <div class="pill active" id="pill-default" onclick="App.setProfile('default')">Default</div>
+                    <div class="pill" id="pill-deep" onclick="App.setProfile('deep')">Deep</div>
+                </div>
+
+                <div class="section-title">Options</div>
+                <div class="toggle" id="toggle-shallow" onclick="App.toggleSetting(this)">
+                    <div>
+                        <div class="toggle-label">Shallow Mode</div>
+                        <div class="toggle-desc">Only scan files in root, skip subdirectories</div>
+                    </div>
+                    <div class="toggle-switch"></div>
+                </div>
+                <div class="toggle" id="toggle-comments" onclick="App.toggleSetting(this)">
+                    <div>
+                        <div class="toggle-label">Inline Comments</div>
+                        <div class="toggle-desc">Add // BoomAI: ... comments to fixes</div>
+                    </div>
+                    <div class="toggle-switch"></div>
+                </div>
+                <div class="toggle" id="toggle-debug" onclick="App.toggleSetting(this)">
+                    <div>
+                        <div class="toggle-label">Debug Logs</div>
+                        <div class="toggle-desc">Verbose logging output</div>
+                    </div>
+                    <div class="toggle-switch"></div>
+                </div>
+
+                <div class="section-title" style="margin-top:24px;">API Key</div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span class="status-dot" id="settings-api-dot"></span>
+                    <span style="font-size:13px; color:var(--text-secondary);" id="settings-api-text"></span>
+                </div>
+            </div>
+        </div>
+
+        <div class="action-bar">
+            <button class="btn btn-primary btn-large" onclick="App.estimate()">
+                Estimate Cost
+            </button>
+        </div>
+    </section>
+
+    <!-- ═══════════ SCREEN 3: ESTIMATE ═══════════ -->
+    <section id="screen-estimate" class="screen">
+        <div class="stars-container">
+            <div class="star"></div><div class="star"></div><div class="star"></div>
+            <div class="star"></div><div class="star"></div><div class="star"></div>
+        </div>
+        <div class="header">
+            <span class="header-back" onclick="App.goTo('browser')">&#8592; Back</span>
+            <div class="header-title">Cost Estimate</div>
+            <div style="width:60px;"></div>
+        </div>
+        <div class="centered" style="position:relative; z-index:1;">
+            <div class="card" style="width:100%; max-width:560px;">
+                <h2 style="font-family:var(--font-heading); font-size:22px; margin-bottom:20px; text-align:center;">
+                    Scan Estimate
+                </h2>
+                <div class="estimate-grid" id="estimate-grid">
+                    <!-- Filled by JS -->
+                </div>
+                <div style="text-align:center; margin-top:28px;">
+                    <div class="estimate-label">Estimated Cost</div>
+                    <div class="estimate-value cost" id="est-cost">--</div>
+                </div>
+                <div style="text-align:center; margin-top:12px;">
+                    <div class="estimate-label">Estimated Time</div>
+                    <div class="estimate-value" id="est-time">--</div>
+                </div>
+                <div id="est-learned" style="text-align:center; margin-top:8px; font-size:11px; color:var(--text-dim);"></div>
+            </div>
+
+            <div style="display:flex; gap:12px; margin-top:28px;">
+                <button class="btn btn-secondary" onclick="App.goTo('browser')">Go Back</button>
+                <button class="btn btn-primary btn-large btn-pulse" onclick="App.startScan()">
+                    Start Scan
+                </button>
+            </div>
+        </div>
+    </section>
+
+    <!-- ═══════════ SCREEN 4: SCANNING ═══════════ -->
+    <section id="screen-scan" class="screen">
+        <div class="stars-container">
+            <div class="star"></div><div class="star"></div><div class="star"></div>
+            <div class="star"></div><div class="star"></div><div class="star"></div>
+            <div class="star"></div><div class="star"></div>
+        </div>
+        <div class="centered" style="position:relative; z-index:1;">
+            <!-- Character animation -->
+            <div class="character-container">
+                <div class="paper-stack" id="stack-inbox">
+                    <div class="paper"></div><div class="paper"></div><div class="paper"></div>
+                    <div class="paper"></div><div class="paper"></div>
+                    <div class="stack-label">To Review</div>
+                </div>
+
+                <div style="position:relative;">
+                    <img src="assets/character.png" class="character-img" alt="BoomAI">
+                    <div class="paper-flying"></div>
+                </div>
+
+                <div class="paper-stack" id="stack-done">
+                    <div class="stack-label">Done</div>
+                </div>
+            </div>
+
+            <!-- Progress -->
+            <div style="width:100%; max-width:500px;">
+                <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+                    <span style="font-size:13px; color:var(--text-secondary);" id="scan-stage">Initializing...</span>
+                    <span style="font-size:13px; color:var(--accent-pink);" id="scan-percent">0%</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="scan-progress-fill" style="width:0%"></div>
+                </div>
+                <div class="scan-log" id="scan-log"></div>
+            </div>
+
+            <button class="btn btn-danger" style="margin-top:16px;" onclick="App.cancelScan()">
+                Cancel Scan
+            </button>
+        </div>
+    </section>
+
+    <!-- ═══════════ SCREEN 5: RESULTS ═══════════ -->
+    <section id="screen-results" class="screen">
+        <div class="header">
+            <div class="header-title">Scan Results</div>
+            <div></div>
+        </div>
+
+        <div style="padding:24px; overflow-y:auto; flex:1;">
+            <!-- Summary card -->
+            <div class="card" style="margin-bottom:24px;">
+                <div class="estimate-grid" id="results-summary">
+                    <!-- Filled by JS -->
+                </div>
+            </div>
+
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+                <div class="section-title" style="margin-bottom:0;">Findings</div>
+                <div id="results-select-actions" style="display:flex; gap:8px;"></div>
+            </div>
+
+            <!-- Findings list -->
+            <div id="findings-list">
+                <!-- Filled by JS -->
+            </div>
+        </div>
+
+        <div class="action-bar">
+            <button class="btn btn-secondary" onclick="App.newScan()">New Scan</button>
+            <button class="btn btn-primary" id="btn-apply-fixes" onclick="App.applyFixes()" style="display:none;">
+                Apply Selected Fixes
+            </button>
+        </div>
+    </section>
+
+</div>
+
+<script src="js/api.js"></script>
+<script src="js/file_browser.js"></script>
+<script src="js/scan_view.js"></script>
+<script src="js/settings_view.js"></script>
+<script src="js/results_view.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

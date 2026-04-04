@@ -67,6 +67,7 @@ Examples (run from inside your project):
     )
 
     sub.add_parser("settings", help="Configure API key & preferences")
+    sub.add_parser("gui", help="Launch the BoomAI desktop application")
     return parser
 
 
@@ -88,6 +89,9 @@ def main() -> None:
         cmd_fix(args)
     elif args.command == "settings":
         cmd_settings(args)
+    elif args.command == "gui":
+        from .gui.launcher import launch_gui
+        launch_gui()
     else:
         parser.print_help()
 
