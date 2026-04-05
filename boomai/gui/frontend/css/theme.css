@@ -8,6 +8,14 @@
     font-display: swap;
 }
 
+@font-face {
+    font-family: 'Knicknack';
+    src: url('../assets/fonts/Knicknack-Regular.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+}
+
 :root {
     /* Primary palette */
     --bg-deep:       #1A0632;
@@ -47,7 +55,7 @@
     --grad-glow:    radial-gradient(circle, rgba(139,48,214,0.3) 0%, transparent 70%);
 
     /* Typography */
-    --font-heading: 'Luckiest Guy', cursive;
+    --font-heading: 'Knicknack', 'Luckiest Guy', cursive;
     --font-body:    'Segoe UI', system-ui, -apple-system, sans-serif;
 
     /* Puffy text depth layers */

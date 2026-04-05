@@ -315,10 +315,16 @@ class BoomAIBridge:
         if not self._scan_runner or not self._scan_runner.review:
             return {"error": "No scan results"}
         try:
+            import io, sys
             from ..app.services.local_patch_service import apply_local
             selected = [self._scan_runner.review.findings[i] for i in finding_indices
                         if i < len(self._scan_runner.review.findings)]
-            count = apply_local(selected, repo_path)
+            old_stdout = sys.stdout
+            sys.stdout = io.StringIO()
+            try:
+                count = apply_local(selected, repo_path)
+            finally:
+                sys.stdout = old_stdout
             return {"applied": count}
         except Exception as exc:
             return {"error": str(exc)}

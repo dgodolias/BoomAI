@@ -131,12 +131,19 @@ const ScanView = {
         const charImg = document.querySelector('.character-img');
         if (charImg) charImg.classList.add('celebrate');
 
-        // Slight delay then show results
+        // Show results after brief delay
         setTimeout(async () => {
-            const results = await API.getScanResults();
-            if (results && !results.error) {
-                ResultsView.show(results);
-                App.goTo('results');
+            try {
+                const results = await API.getScanResults();
+                if (results && !results.error) {
+                    ResultsView.show(results);
+                    App.goTo('results');
+                } else {
+                    document.getElementById('scan-stage').textContent =
+                        `Error loading results: ${results?.error || 'unknown'}`;
+                }
+            } catch (e) {
+                document.getElementById('scan-stage').textContent = `Error: ${e.message}`;
             }
         }, 1200);
     },

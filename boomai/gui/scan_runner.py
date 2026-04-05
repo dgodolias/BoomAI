@@ -89,6 +89,7 @@ class ScanRunner:
         self.applied_count = 0
         self.elapsed = 0.0
         self.error: str | None = None
+        self.cost_report_path: str | None = None
 
         self._messages: list[str] = []
         self._lock = threading.Lock()
@@ -332,7 +333,7 @@ class ScanRunner:
             self.cost_report_path = None
             if settings.cost_reporting_enabled and self.review.usage and self.review.usage.api_calls > 0:
                 try:
-                    self.cost_report_path = write_run_cost_report(
+                    self.cost_report_path = str(write_run_cost_report(
                         repo_path=self.repo_path,
                         estimate=self._estimate,
                         review=self.review,
@@ -341,7 +342,7 @@ class ScanRunner:
                         applied_count=0,
                         issue_seed_count=len(analysis.prioritized_issue_seeds),
                         languages=languages,
-                    )
+                    ))
                 except Exception:
                     pass  # Non-critical
 
