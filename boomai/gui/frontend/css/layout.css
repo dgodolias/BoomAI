@@ -83,8 +83,9 @@
 .header-title {
     font-family: var(--font-heading);
     font-size: 18px;
-    letter-spacing: 1px;
+    letter-spacing: 1.5px;
     color: var(--text-secondary);
+    text-shadow: var(--puffy-shadow);
 }
 
 .header-back {
@@ -125,8 +126,9 @@
 .section-title {
     font-family: var(--font-heading);
     font-size: 14px;
-    letter-spacing: 1px;
+    letter-spacing: 1.5px;
     color: var(--text-secondary);
     margin-bottom: 16px;
     text-transform: uppercase;
+    text-shadow: var(--puffy-shadow);
 }

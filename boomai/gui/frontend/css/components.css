@@ -46,7 +46,8 @@
     padding: 16px 48px;
     font-size: 16px;
     font-family: var(--font-heading);
-    letter-spacing: 1px;
+    letter-spacing: 1.5px;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
 .btn-danger {
@@ -88,8 +89,9 @@
 .deep-mode-title {
     font-family: var(--font-heading);
     font-size: 14px;
-    letter-spacing: 0.5px;
+    letter-spacing: 1px;
     color: var(--text-primary);
+    text-shadow: var(--puffy-shadow);
 }
 
 .deep-mode-desc {
@@ -386,6 +388,10 @@
     color: var(--accent-pink);
     font-family: var(--font-heading);
     font-size: 24px;
+    text-shadow:
+        0 1px 0 #cc4488,
+        0 2px 0 #993366,
+        0 3px 6px rgba(0, 0, 0, 0.3);
 }
 
 /* Input field */

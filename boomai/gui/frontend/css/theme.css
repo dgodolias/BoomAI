@@ -50,6 +50,13 @@
     --font-heading: 'Luckiest Guy', cursive;
     --font-body:    'Segoe UI', system-ui, -apple-system, sans-serif;
 
+    /* Puffy text depth layers */
+    --puffy-shadow:
+        0 1px 0 #6B1FA0,
+        0 2px 0 #4A0E78,
+        0 3px 0 #2D0A4E,
+        0 4px 8px rgba(0, 0, 0, 0.35);
+
     /* Spacing */
     --radius-sm: 8px;
     --radius-md: 12px;
