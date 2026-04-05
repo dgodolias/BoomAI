@@ -59,8 +59,9 @@ const ResultsView = {
             return;
         }
 
-        // Count fixable
+        // Split into fixable / non-fixable
         const fixable = results.findings.filter(f => f.fixable);
+        const nonFixable = results.findings.filter(f => !f.fixable);
 
         // Select actions
         const selectActions = document.getElementById('results-select-actions');
@@ -75,39 +76,77 @@ const ResultsView = {
             document.getElementById('btn-apply-fixes').style.display = 'none';
         }
 
-        // Render findings
-        for (const f of results.findings) {
+        // Render fixable first
+        if (fixable.length > 0) {
+            const header = document.createElement('div');
+            header.className = 'section-title';
+            header.style.marginTop = '0';
+            header.innerHTML = `Fixable <span style="font-family:var(--font-body); font-size:12px; opacity:0.6;">(${fixable.length})</span>`;
+            list.appendChild(header);
+        }
+        for (const f of fixable) {
             const card = document.createElement('div');
             card.className = 'finding-card fade-in-up';
             card.style.animationDelay = `${results.findings.indexOf(f) * 50}ms`;
 
             const bodyLines = (f.body || '').split('\n').slice(0, 4).join('\n');
 
-            let fixHtml = '';
+            const isSelected = this.selectedFixes.has(f.index);
+
             if (f.fixable) {
-                fixHtml = `
-                    <label style="display:flex; align-items:center; gap:6px; margin-top:10px; cursor:pointer; font-size:12px; color:var(--success);">
-                        <input type="checkbox" class="tree-checkbox fix-checkbox"
-                               data-index="${f.index}"
-                               ${this.selectedFixes.has(f.index) ? 'checked' : ''}
-                               onchange="ResultsView.toggleFix(${f.index}, this.checked)">
-                        Include fix
-                    </label>
-                `;
+                card.style.cursor = 'pointer';
+                card.style.borderColor = isSelected ? 'var(--success)' : '';
+                card.addEventListener('click', (e) => {
+                    if (e.target.tagName === 'INPUT') return; // let checkbox handle itself
+                    const cb = card.querySelector('.fix-checkbox');
+                    if (cb) {
+                        cb.checked = !cb.checked;
+                        ResultsView.toggleFix(f.index, cb.checked);
+                        card.style.borderColor = cb.checked ? 'var(--success)' : '';
+                    }
+                });
             }
 
             card.innerHTML = `
                 <div class="finding-header">
+                    ${f.fixable ? `<input type="checkbox" class="tree-checkbox fix-checkbox"
+                        data-index="${f.index}"
+                        ${isSelected ? 'checked' : ''}
+                        onchange="event.stopPropagation(); ResultsView.toggleFix(${f.index}, this.checked); this.closest('.finding-card').style.borderColor = this.checked ? 'var(--success)' : '';">` : ''}
                     <span class="severity-badge ${f.severity}">${f.severity}</span>
                     <span class="finding-file">${f.file}:${f.line}</span>
                     ${f.fixable ? '<span class="fix-badge">FIX</span>' : ''}
                     ${f.category ? `<span style="font-size:11px; color:var(--text-dim);">${f.category}</span>` : ''}
                 </div>
                 <div class="finding-body">${this._escapeHtml(bodyLines)}</div>
-                ${fixHtml}
             `;
 
             list.appendChild(card);
+        }
+
+        // Render non-fixable
+        if (nonFixable.length > 0) {
+            const header = document.createElement('div');
+            header.className = 'section-title';
+            header.style.marginTop = '24px';
+            header.innerHTML = `Informational <span style="font-family:var(--font-body); font-size:12px; opacity:0.6;">(${nonFixable.length})</span>`;
+            list.appendChild(header);
+
+            for (const f of nonFixable) {
+                const card = document.createElement('div');
+                card.className = 'finding-card fade-in-up';
+                card.style.opacity = '0.7';
+                const bodyLines = (f.body || '').split('\n').slice(0, 4).join('\n');
+                card.innerHTML = `
+                    <div class="finding-header">
+                        <span class="severity-badge ${f.severity}">${f.severity}</span>
+                        <span class="finding-file">${f.file}:${f.line}</span>
+                        ${f.category ? `<span style="font-size:11px; color:var(--text-dim);">${f.category}</span>` : ''}
+                    </div>
+                    <div class="finding-body">${this._escapeHtml(bodyLines)}</div>
+                `;
+                list.appendChild(card);
+            }
         }
     },
 
@@ -122,13 +161,19 @@ const ResultsView = {
         for (const f of this.results.findings) {
             if (f.fixable) this.selectedFixes.add(f.index);
         }
-        document.querySelectorAll('.fix-checkbox').forEach(cb => cb.checked = true);
+        document.querySelectorAll('.fix-checkbox').forEach(cb => {
+            cb.checked = true;
+            cb.closest('.finding-card').style.borderColor = 'var(--success)';
+        });
         this._updateApplyButton();
     },
 
     deselectAllFixes() {
         this.selectedFixes.clear();
-        document.querySelectorAll('.fix-checkbox').forEach(cb => cb.checked = false);
+        document.querySelectorAll('.fix-checkbox').forEach(cb => {
+            cb.checked = false;
+            cb.closest('.finding-card').style.borderColor = '';
+        });
         this._updateApplyButton();
     },
 

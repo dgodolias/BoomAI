@@ -139,6 +139,20 @@ const App = {
 
     toggleSetting(el) {
         el.classList.toggle('active');
+        const isActive = el.classList.contains('active');
+        const id = el.id;
+        // Persist toggle to backend
+        const settingMap = {
+            'toggle-comments': 'SCAN_COMMENTS',
+            'toggle-debug': 'SCAN_DEBUG',
+            'toggle-cost-report': 'COST_REPORTING_ENABLED',
+            'toggle-deep': 'SCAN_PROFILE',
+        };
+        const key = settingMap[id];
+        if (key) {
+            const value = key === 'SCAN_PROFILE' ? (isActive ? 'deep' : 'default') : String(isActive);
+            API.saveSetting(key, value);
+        }
     },
 
     async changeModel(role, modelId) {

@@ -47,9 +47,13 @@ const ScanView = {
         document.getElementById('scan-progress-fill').style.width = `${pct}%`;
         document.getElementById('scan-percent').textContent = `${pct}%`;
 
-        // Stage label
+        // Stage label — use estimated_files for smooth display
         if (status.stage) {
-            document.getElementById('scan-stage').textContent = status.stage;
+            let stage = status.stage;
+            if (status.estimated_files > 0 && status.total_files > 0 && stage.includes('Reviewing')) {
+                stage = `Reviewing files (est. ${status.estimated_files}/${status.total_files})...`;
+            }
+            document.getElementById('scan-stage').textContent = stage;
         }
 
         // Log messages
