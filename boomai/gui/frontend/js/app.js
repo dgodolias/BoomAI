@@ -9,6 +9,23 @@ const App = {
     async init() {
         await SettingsView.load();
         this._loadRecentProjects();
+        this._showCwd();
+    },
+
+    async _showCwd() {
+        const result = await API.getCwd();
+        if (result && result.path) {
+            this._cwd = result.path;
+            const display = result.path.replace(/\\/g, '/');
+            document.getElementById('cwd-path').textContent = display;
+            document.getElementById('cwd-card').style.display = 'block';
+        }
+    },
+
+    async useCwd() {
+        if (!await this._ensureApiKey()) return;
+        if (!this._cwd) return;
+        this._openProject(this._cwd);
     },
 
     // ── Navigation ────────────────────────────────
@@ -30,25 +47,20 @@ const App = {
 
     async openFolder() {
         if (!await this._ensureApiKey()) return;
-
         const result = await API.selectFolder();
         if (!result || !result.path) return;
-
-        this.repoPath = result.path;
-        document.getElementById('project-name').textContent =
-            result.path.replace(/\\/g, '/').split('/').pop();
-
-        this.goTo('browser');
-        this._loadFileTree();
+        this._openProject(result.path);
     },
 
     async openRecentProject(path) {
         if (!await this._ensureApiKey()) return;
+        this._openProject(path);
+    },
 
+    _openProject(path) {
         this.repoPath = path;
         document.getElementById('project-name').textContent =
             path.replace(/\\/g, '/').split('/').pop();
-
         this.goTo('browser');
         this._loadFileTree();
     },

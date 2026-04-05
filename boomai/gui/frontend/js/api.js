@@ -26,6 +26,7 @@ const API = {
     },
 
     selectFolder()              { return this.call('select_folder'); },
+    getCwd()                    { return this.call('get_cwd'); },
     getFileTree(path)           { return this.call('get_file_tree', path); },
     getRecentProjects()         { return this.call('get_recent_projects'); },
     getSettings()               { return this.call('get_settings'); },

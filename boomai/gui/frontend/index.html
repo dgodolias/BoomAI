@@ -48,8 +48,18 @@
                 </p>
             </div>
 
+            <div id="cwd-card" style="display:none; width:100%; max-width:500px; margin-bottom:20px;
+                        background:var(--card-bg); border:1px solid var(--border); border-radius:var(--radius-md);
+                        padding:14px 20px; cursor:pointer; transition:all 200ms;"
+                 onclick="App.useCwd()" onmouseover="this.style.borderColor='var(--accent-pink)'"
+                 onmouseout="this.style.borderColor='var(--border)'">
+                <div style="font-size:11px; color:var(--text-dim); margin-bottom:4px;">CURRENT DIRECTORY</div>
+                <div style="font-size:14px; color:var(--accent-pink);" id="cwd-path"></div>
+                <div style="font-size:11px; color:var(--text-dim); margin-top:4px;">Click to scan this project</div>
+            </div>
+
             <button class="btn btn-primary btn-large" onclick="App.openFolder()" id="btn-open-folder">
-                Open Project Folder
+                Browse Other Folder
             </button>
 
             <div id="recent-projects" style="margin-top:32px; width:100%; max-width:500px;"></div>

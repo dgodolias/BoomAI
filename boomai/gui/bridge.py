@@ -25,9 +25,10 @@ _RECENT_FILE = Path.home() / ".boomai" / "gui_recent.json"
 class BoomAIBridge:
     """Every public method is callable from JS as window.pywebview.api.methodName()."""
 
-    def __init__(self) -> None:
+    def __init__(self, cwd: str | None = None) -> None:
         self._window: webview.Window | None = None
         self._scan_runner: ScanRunner | None = None
+        self._cwd = cwd or os.path.abspath(".")
 
     def set_window(self, window: webview.Window) -> None:
         self._window = window
@@ -37,12 +38,18 @@ class BoomAIBridge:
     def select_folder(self) -> dict:
         if self._window is None:
             return {"path": None}
-        result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
+        result = self._window.create_file_dialog(
+            webview.FOLDER_DIALOG, directory=self._cwd,
+        )
         if result and len(result) > 0:
             path = str(result[0])
             self._add_recent(path)
             return {"path": path}
         return {"path": None}
+
+    def get_cwd(self) -> dict:
+        """Return the directory from which the GUI was launched."""
+        return {"path": self._cwd}
 
     def get_file_tree(self, repo_path: str) -> dict:
         try:
