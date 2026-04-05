@@ -18,6 +18,8 @@ from ..context.indexer import build_code_index
 from ..core.config import settings
 from ..core.models import ReviewSummary
 from ..integrations.google.models_catalog_service import ModelCatalogService
+from ..review.estimation_history import record_run
+from ..review.estimator import get_pricing
 from ..review.progress_history import ChunkProgressFeatures, predict_chunk_elapsed_seconds
 from ..review.services.review_workflow import ReviewWorkflow
 
@@ -66,12 +68,14 @@ class ScanRunner:
         profile: str = "default",
         comments: bool = False,
         shallow: bool = False,
+        estimate_features=None,
     ) -> None:
         self.repo_path = repo_path
         self.selected_files = selected_files
         self.profile = profile
         self.comments = comments
         self.shallow = shallow
+        self._estimate_features = estimate_features
 
         self.state = "idle"
         self.stage = ""
@@ -294,9 +298,20 @@ class ScanRunner:
 
             # No auto-apply — user chooses which fixes to apply on results screen
             self.applied_count = 0
+            self.elapsed = time.monotonic() - started
+
+            # Record run for calibration (same as CLI)
+            if self._estimate_features and self.review.usage and self.review.usage.api_calls > 0:
+                record_run(
+                    features=self._estimate_features,
+                    elapsed_seconds=self.elapsed,
+                    usage=self.review.usage,
+                    findings_count=len(self.review.findings),
+                    applied_count=0,
+                    get_pricing=get_pricing,
+                )
 
             self.progress = 1.0
-            self.elapsed = time.monotonic() - started
             self.stage = "Complete"
             self.state = "done"
             self._emit(f"Scan complete — {len(self.review.findings)} issues found")

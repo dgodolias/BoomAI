@@ -30,6 +30,7 @@ class BoomAIBridge:
         self._window: webview.Window | None = None
         self._scan_runner: ScanRunner | None = None
         self._cwd = cwd or os.path.abspath(".")
+        self._last_estimate = None  # ScanEstimate from most recent estimate()
 
     def set_window(self, window: webview.Window) -> None:
         self._window = window
@@ -213,6 +214,7 @@ class BoomAIBridge:
                 patch_max_findings_per_chunk=settings.patch_max_findings_per_chunk,
                 languages=languages,
             )
+            self._last_estimate = est
 
             return {
                 "profile": est.profile,
@@ -250,6 +252,7 @@ class BoomAIBridge:
                 profile=profile,
                 comments=comments,
                 shallow=shallow,
+                estimate_features=self._last_estimate.features if self._last_estimate else None,
             )
             self._scan_runner.start()
             return {"started": True}
