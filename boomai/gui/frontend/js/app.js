@@ -223,7 +223,7 @@ const App = {
             </div>
             <div class="estimate-item">
                 <div class="estimate-label">API Calls</div>
-                <div class="estimate-value">${est.api_calls_low}–${est.api_calls_high}</div>
+                <div class="estimate-value">${est.api_calls_low === est.api_calls_high ? est.api_calls_low : est.api_calls_low + '–' + est.api_calls_high}</div>
             </div>
             <div class="estimate-item">
                 <div class="estimate-label">Total Chars</div>
@@ -232,12 +232,16 @@ const App = {
         `;
 
         // Cost
+        const costMin = est.cost_min.toFixed(2);
+        const costMax = est.cost_max.toFixed(2);
         document.getElementById('est-cost').textContent =
-            `$${est.cost_min.toFixed(2)} – $${est.cost_max.toFixed(2)}`;
+            costMin === costMax ? `$${costMin}` : `$${costMin} – $${costMax}`;
 
         // Time
+        const tMin = this._formatTime(est.time_min);
+        const tMax = this._formatTime(est.time_max);
         document.getElementById('est-time').textContent =
-            `${this._formatTime(est.time_min)} – ${this._formatTime(est.time_max)}`;
+            tMin === tMax ? tMin : `${tMin} – ${tMax}`;
 
         // Learned
         const learnedEl = document.getElementById('est-learned');
