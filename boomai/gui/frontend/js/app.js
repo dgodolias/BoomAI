@@ -108,6 +108,15 @@ const App = {
         await SettingsView.load();
     },
 
+    async updateApiKey() {
+        const input = document.getElementById('settings-api-input');
+        const key = input.value.trim();
+        if (!key) return;
+        await API.setApiKey(key);
+        input.value = '';
+        await SettingsView.load();
+    },
+
     async _ensureApiKey() {
         const status = await API.getApiKeyStatus();
         if (!status.configured) {
@@ -121,12 +130,52 @@ const App = {
     // ── Settings ──────────────────────────────────
 
     setProfile(profile) {
-        document.getElementById('pill-default').classList.toggle('active', profile === 'default');
-        document.getElementById('pill-deep').classList.toggle('active', profile === 'deep');
+        const el = document.getElementById('toggle-deep');
+        if (el) {
+            if (profile === 'deep') el.classList.add('active');
+            else el.classList.remove('active');
+        }
     },
 
     toggleSetting(el) {
         el.classList.toggle('active');
+    },
+
+    async changeModel(role, modelId) {
+        await API.setModel(role, modelId);
+        await SettingsView.load();
+    },
+
+    async refreshCatalog() {
+        const btn = document.querySelector('[onclick="App.refreshCatalog()"]');
+        const original = btn.textContent;
+        btn.textContent = 'Refreshing...';
+        btn.disabled = true;
+        btn.style.opacity = '0.6';
+
+        const result = await API.refreshCatalog();
+        if (result.error) {
+            btn.textContent = 'Error!';
+            btn.style.color = 'var(--error)';
+            setTimeout(() => {
+                btn.textContent = original;
+                btn.style.color = '';
+                btn.style.opacity = '';
+                btn.disabled = false;
+            }, 2000);
+        } else {
+            btn.textContent = 'Refreshed!';
+            btn.style.color = 'var(--success)';
+            btn.style.borderColor = 'var(--success)';
+            await SettingsView.load();
+            setTimeout(() => {
+                btn.textContent = original;
+                btn.style.color = '';
+                btn.style.borderColor = '';
+                btn.style.opacity = '';
+                btn.disabled = false;
+            }, 1500);
+        }
     },
 
     // ── Estimation ────────────────────────────────

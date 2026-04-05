@@ -11,23 +11,40 @@ const SettingsView = {
         this._updateApiStatus(this.settings.api_key_set, this.settings.api_key_masked);
 
         // Toggles
-        this._syncToggle('toggle-shallow', false);
         this._syncToggle('toggle-comments', this.settings.scan_comments);
         this._syncToggle('toggle-debug', this.settings.scan_debug);
 
-        // Profile pill
-        if (this.settings.scan_profile === 'deep') {
-            document.getElementById('pill-default').classList.remove('active');
-            document.getElementById('pill-deep').classList.add('active');
-        } else {
-            document.getElementById('pill-default').classList.add('active');
-            document.getElementById('pill-deep').classList.remove('active');
-        }
+        // Profile toggle
+        this._syncToggle('toggle-deep', this.settings.scan_profile === 'deep');
+
+        this._syncToggle('toggle-cost-report', this.settings.cost_reporting_enabled);
 
         // Show/hide API key input on welcome
         if (!this.settings.api_key_set) {
             document.getElementById('api-key-setup').style.display = 'block';
             document.getElementById('btn-open-folder').style.opacity = '0.5';
+        }
+
+        // Model dropdowns
+        this._populateModelSelect('select-strong-model', this.settings.strong_candidates || []);
+        this._populateModelSelect('select-weak-model', this.settings.weak_candidates || []);
+
+        const strongLabel = document.getElementById('strong-mode-label');
+        const weakLabel = document.getElementById('weak-mode-label');
+        if (strongLabel) strongLabel.textContent = (this.settings.strong_mode || 'auto').toUpperCase();
+        if (weakLabel) weakLabel.textContent = (this.settings.weak_mode || 'auto').toUpperCase();
+    },
+
+    _populateModelSelect(selectId, candidates) {
+        const select = document.getElementById(selectId);
+        if (!select) return;
+        select.innerHTML = '<option value="">AUTO</option>';
+        for (const c of candidates) {
+            const opt = document.createElement('option');
+            opt.value = c.model_id;
+            opt.textContent = c.display_name;
+            if (c.current) opt.selected = true;
+            select.appendChild(opt);
         }
     },
 
@@ -62,11 +79,11 @@ const SettingsView = {
     },
 
     getProfile() {
-        return document.getElementById('pill-deep').classList.contains('active') ? 'deep' : 'default';
+        return this.isToggleActive('toggle-deep') ? 'deep' : 'default';
     },
 
     isShallow() {
-        return this.isToggleActive('toggle-shallow');
+        return false;
     },
 
     isComments() {

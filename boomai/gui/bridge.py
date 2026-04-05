@@ -14,6 +14,7 @@ from ..app.services.file_selection_service import collect_files, read_file_conte
 from ..app.services.settings_service import (
     mask_api_key,
     save_setting,
+    set_model_role,
     refresh_runtime_model_catalog,
 )
 from ..core.config import settings
@@ -94,6 +95,29 @@ class BoomAIBridge:
     # ── Settings ─────────────────────────────────────────
 
     def get_settings(self) -> dict:
+        # Get model info
+        strong_name = weak_name = strong_mode = weak_mode = ""
+        strong_candidates = []
+        weak_candidates = []
+        try:
+            runtime = refresh_runtime_model_catalog()
+            strong_name = f"{runtime.strong_display_name} [{runtime.strong_model_id}]"
+            weak_name = f"{runtime.weak_display_name} [{runtime.weak_model_id}]"
+            strong_mode = runtime.strong_mode
+            weak_mode = runtime.weak_mode
+            strong_candidates = [
+                {"model_id": e.model_id, "display_name": e.display_name,
+                 "current": e.model_id == runtime.strong_model_id}
+                for e in runtime.strong_candidates
+            ]
+            weak_candidates = [
+                {"model_id": e.model_id, "display_name": e.display_name,
+                 "current": e.model_id == runtime.weak_model_id}
+                for e in runtime.weak_candidates
+            ]
+        except Exception:
+            pass
+
         return {
             "api_key_set": bool(settings.google_api_key),
             "api_key_masked": mask_api_key(settings.google_api_key or ""),
@@ -101,6 +125,12 @@ class BoomAIBridge:
             "scan_comments": settings.scan_comments,
             "scan_debug": settings.scan_debug,
             "cost_reporting_enabled": settings.cost_reporting_enabled,
+            "strong_model": strong_name,
+            "weak_model": weak_name,
+            "strong_mode": strong_mode,
+            "weak_mode": weak_mode,
+            "strong_candidates": strong_candidates,
+            "weak_candidates": weak_candidates,
         }
 
     def set_api_key(self, key: str) -> dict:
@@ -120,6 +150,28 @@ class BoomAIBridge:
             else:
                 setattr(settings, attr, value)
         return {"ok": True}
+
+    def set_model(self, role: str, model_id: str) -> dict:
+        """Set strong or weak model. Pass empty string to reset to AUTO."""
+        try:
+            if not model_id:
+                set_model_role(role, mode="auto")
+            else:
+                set_model_role(role, mode="manual", override=model_id)
+            return {"ok": True}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+    def refresh_catalog(self) -> dict:
+        try:
+            runtime = refresh_runtime_model_catalog(force_refresh=True)
+            return {
+                "ok": True,
+                "strong": f"{runtime.strong_display_name} [{runtime.strong_model_id}]",
+                "weak": f"{runtime.weak_display_name} [{runtime.weak_model_id}]",
+            }
+        except Exception as exc:
+            return {"error": str(exc)}
 
     def get_api_key_status(self) -> dict:
         return {

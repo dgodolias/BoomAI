@@ -92,20 +92,18 @@
 
             <!-- Right: Settings -->
             <div class="split-right">
-                <div class="section-title">Scan Profile</div>
-                <div class="pill-group" style="margin-bottom:24px;">
-                    <div class="pill active" id="pill-default" onclick="App.setProfile('default')">Default</div>
-                    <div class="pill" id="pill-deep" onclick="App.setProfile('deep')">Deep</div>
+                <div class="deep-mode-card" id="deep-mode-card" onclick="App.toggleSetting(document.getElementById('toggle-deep'))">
+                    <div class="deep-mode-icon">🔬</div>
+                    <div style="flex:1;">
+                        <div class="deep-mode-title">Deep Scan</div>
+                        <div class="deep-mode-desc">Smaller chunks, more findings, higher cost</div>
+                    </div>
+                    <div class="toggle" id="toggle-deep" onclick="event.stopPropagation(); App.toggleSetting(this)" style="border:none; padding:0;">
+                        <div class="toggle-switch"></div>
+                    </div>
                 </div>
 
                 <div class="section-title">Options</div>
-                <div class="toggle" id="toggle-shallow" onclick="App.toggleSetting(this)">
-                    <div>
-                        <div class="toggle-label">Shallow Mode</div>
-                        <div class="toggle-desc">Only scan files in root, skip subdirectories</div>
-                    </div>
-                    <div class="toggle-switch"></div>
-                </div>
                 <div class="toggle" id="toggle-comments" onclick="App.toggleSetting(this)">
                     <div>
                         <div class="toggle-label">Inline Comments</div>
@@ -121,10 +119,44 @@
                     <div class="toggle-switch"></div>
                 </div>
 
+                <div class="toggle" id="toggle-cost-report" onclick="App.toggleSetting(this)">
+                    <div>
+                        <div class="toggle-label">Cost Report</div>
+                        <div class="toggle-desc">Generate detailed cost breakdown after scan</div>
+                    </div>
+                    <div class="toggle-switch"></div>
+                </div>
+
+                <div class="section-title" style="margin-top:24px;">Models</div>
+                <div style="margin-bottom:12px;">
+                    <div style="font-size:11px; color:var(--text-dim); margin-bottom:4px;">
+                        Strong (<span id="strong-mode-label">AUTO</span>)
+                    </div>
+                    <select id="select-strong-model" class="input-field" style="font-size:12px; padding:6px 10px;"
+                            onchange="App.changeModel('strong', this.value)">
+                    </select>
+                </div>
+                <div style="margin-bottom:12px;">
+                    <div style="font-size:11px; color:var(--text-dim); margin-bottom:4px;">
+                        Weak (<span id="weak-mode-label">AUTO</span>)
+                    </div>
+                    <select id="select-weak-model" class="input-field" style="font-size:12px; padding:6px 10px;"
+                            onchange="App.changeModel('weak', this.value)">
+                    </select>
+                </div>
+                <button class="btn btn-secondary" style="font-size:11px; padding:4px 12px; width:100%;"
+                        onclick="App.refreshCatalog()">Refresh Model Catalog</button>
+
                 <div class="section-title" style="margin-top:24px;">API Key</div>
-                <div style="display:flex; align-items:center; gap:8px;">
+                <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
                     <span class="status-dot" id="settings-api-dot"></span>
                     <span style="font-size:13px; color:var(--text-secondary);" id="settings-api-text"></span>
+                </div>
+                <div style="display:flex; gap:8px;">
+                    <input type="password" id="settings-api-input" class="input-field"
+                           style="font-size:12px;" placeholder="Enter new API key...">
+                    <button class="btn btn-primary" style="font-size:12px; padding:6px 14px;"
+                            onclick="App.updateApiKey()">Update</button>
                 </div>
             </div>
         </div>

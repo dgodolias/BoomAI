@@ -32,6 +32,8 @@ const API = {
     getSettings()               { return this.call('get_settings'); },
     setApiKey(key)              { return this.call('set_api_key', key); },
     saveSetting(key, value)     { return this.call('save_setting', key, value); },
+    setModel(role, modelId)     { return this.call('set_model', role, modelId); },
+    refreshCatalog()            { return this.call('refresh_catalog'); },
     getApiKeyStatus()           { return this.call('get_api_key_status'); },
     estimate(path, files, profile, shallow)
         { return this.call('estimate', path, files, profile, shallow); },
