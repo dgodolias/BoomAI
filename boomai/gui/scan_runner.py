@@ -12,6 +12,7 @@ import time
 import traceback
 
 from ..analysis.languages import detect_languages, filter_reviewable_files
+from ..analysis.services.static_analysis_service import StaticAnalysisService
 from ..app.services.file_selection_service import read_file_contents
 from ..app.services.profile_service import apply_scan_profile
 from ..context.indexer import build_code_index
@@ -21,6 +22,7 @@ from ..integrations.google.models_catalog_service import ModelCatalogService
 from ..review.estimation_history import record_run
 from ..review.estimator import get_pricing
 from ..review.progress_history import ChunkProgressFeatures, predict_chunk_elapsed_seconds
+from ..review.run_cost_report import write_run_cost_report
 from ..review.services.review_workflow import ReviewWorkflow
 
 # ── Regex patterns (same as CLI's ScanProgressDisplay) ────────
@@ -76,6 +78,8 @@ class ScanRunner:
         self.comments = comments
         self.shallow = shallow
         self._estimate_features = estimate_features
+        self._estimate = None  # Set by bridge before start
+        self._runtime_models = None
 
         self.state = "idle"
         self.stage = ""
@@ -266,6 +270,7 @@ class ScanRunner:
             catalog = ModelCatalogService()
             runtime_models = catalog.get_runtime_models()
             catalog.apply_runtime_models(runtime_models)
+            self._runtime_models = runtime_models
 
             files = list(self.selected_files)
             if self.shallow:
@@ -283,6 +288,17 @@ class ScanRunner:
             self.stage = "Building code index..."
             code_index = build_code_index(file_contents, languages)
 
+            # Run static analysis (same as CLI)
+            self._emit("Running static analysis...")
+            self.stage = "Running static analysis..."
+            static_service = StaticAnalysisService()
+            analysis = static_service.run(
+                repo_path=self.repo_path,
+                reviewable_files=reviewable,
+                detected_languages=languages,
+                on_progress=self._emit,
+            )
+
             self.stage = "Starting AI review..."
             workflow = ReviewWorkflow()
             self.review = asyncio.run(
@@ -292,6 +308,7 @@ class ScanRunner:
                     runtime_models=runtime_models,
                     on_progress=self._emit,
                     file_contents=file_contents,
+                    issue_seeds=analysis.prioritized_issue_seeds,
                     code_index=code_index,
                 )
             )
@@ -310,6 +327,23 @@ class ScanRunner:
                     applied_count=0,
                     get_pricing=get_pricing,
                 )
+
+            # Generate cost report if enabled (same as CLI)
+            self.cost_report_path = None
+            if settings.cost_reporting_enabled and self.review.usage and self.review.usage.api_calls > 0:
+                try:
+                    self.cost_report_path = write_run_cost_report(
+                        repo_path=self.repo_path,
+                        estimate=self._estimate,
+                        review=self.review,
+                        runtime_models=runtime_models,
+                        elapsed_seconds=self.elapsed,
+                        applied_count=0,
+                        issue_seed_count=len(analysis.prioritized_issue_seeds),
+                        languages=languages,
+                    )
+                except Exception:
+                    pass  # Non-critical
 
             self.progress = 1.0
             self.stage = "Complete"

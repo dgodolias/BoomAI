@@ -254,6 +254,7 @@ class BoomAIBridge:
                 shallow=shallow,
                 estimate_features=self._last_estimate.features if self._last_estimate else None,
             )
+            self._scan_runner._estimate = self._last_estimate
             self._scan_runner.start()
             return {"started": True}
         except Exception as exc:
@@ -305,6 +306,7 @@ class BoomAIBridge:
             "usage": usage,
             "elapsed": round(self._scan_runner.elapsed, 1),
             "applied_count": self._scan_runner.applied_count,
+            "cost_report": self._scan_runner.cost_report_path,
         }
 
     # ── Fix Application ──────────────────────────────────
