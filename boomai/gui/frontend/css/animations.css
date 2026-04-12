@@ -138,6 +138,19 @@
     border: 3px solid var(--accent-purple);
 }
 
+.scan-logo {
+    width: 140px;
+    height: 140px;
+    object-fit: contain;
+    border-radius: 24px;
+    background: transparent;
+    border: none;
+    padding: 6px;
+    animation: char-bob 3s ease-in-out infinite;
+    box-shadow: none;
+    filter: none;
+}
+
 /* ── Paper stacks ─────────────────────────────── */
 
 .paper-stack {
