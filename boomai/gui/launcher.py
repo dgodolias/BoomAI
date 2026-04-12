@@ -85,4 +85,7 @@ def launch_gui() -> None:
         _set_windows_icon()
 
     window.events.shown += _on_shown
-    webview.start(debug=False)
+    try:
+        webview.start(debug=False)
+    except KeyboardInterrupt:
+        return
