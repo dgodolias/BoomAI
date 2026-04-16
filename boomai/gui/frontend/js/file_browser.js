@@ -15,13 +15,6 @@ const FileBrowser = {
 
         this._collectFiles(this.tree, '');
 
-        // Auto-select all reviewable files
-        for (const f of this.allFiles) {
-            if (this.reviewableFiles.has(f)) {
-                this.selectedFiles.add(f);
-            }
-        }
-
         const container = document.getElementById('file-tree');
         container.innerHTML = '';
         container.appendChild(this._buildNode(this.tree, ''));

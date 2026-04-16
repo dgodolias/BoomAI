@@ -14,7 +14,12 @@ BOOM_COLORS = [
     (255, 119, 171),
 ]
 TITLE_LINES = [
-    "BOOMAI",
+    "██████╗  ██████╗  ██████╗ ███╗   ███╗     █████╗ ██╗",
+    "██╔══██╗██╔═══██╗██╔═══██╗████╗ ████║    ██╔══██╗██║",
+    "██████╔╝██║   ██║██║   ██║██╔████╔██║    ███████║██║",
+    "██╔══██╗██║   ██║██║   ██║██║╚██╔╝██║    ██╔══██║██║",
+    "██████╔╝╚██████╔╝╚██████╔╝██║ ╚═╝ ██║    ██║  ██║██║",
+    "╚═════╝  ╚═════╝  ╚═════╝ ╚═╝     ╚═╝    ╚═╝  ╚═╝╚═╝",
 ]
 ACCENT = "pixel-powered code fixer for C#/Unity"
 
@@ -87,6 +92,42 @@ def gradient_text(text: str, colors: list[tuple[int, int, int]]) -> str:
     return "".join(colored)
 
 
+def render_pixel_banner_line(pattern: str, colors: list[tuple[int, int, int]]) -> str:
+    if not pattern or not supports_color():
+        return pattern
+
+    visible_columns = [index for index, char in enumerate(pattern) if char != " "]
+    if not visible_columns:
+        return pattern
+
+    start_col = visible_columns[0]
+    end_col = visible_columns[-1]
+    span = max(1, end_col - start_col)
+    segments = len(colors) - 1
+    rendered: list[str] = []
+
+    for index, char in enumerate(pattern):
+        if char == " ":
+            rendered.append(char)
+            continue
+
+        position = (index - start_col) / span
+        segment = min(segments - 1, int(position * segments))
+        local_start = segment / segments
+        local_end = (segment + 1) / segments
+        local_t = 0.0 if local_end == local_start else (position - local_start) / (local_end - local_start)
+        start = colors[segment]
+        end = colors[segment + 1]
+        color = (
+            int(start[0] + (end[0] - start[0]) * local_t),
+            int(start[1] + (end[1] - start[1]) * local_t),
+            int(start[2] + (end[2] - start[2]) * local_t),
+        )
+        rendered.append(rgb(color, char, bold=True))
+
+    return "".join(rendered)
+
+
 def print_banner() -> None:
     print()
     if supports_color():
@@ -94,7 +135,7 @@ def print_banner() -> None:
         print(f"  {divider}")
         print()
         for line in TITLE_LINES:
-            print(f"    {gradient_text(line, BOOM_COLORS)}")
+            print(f"    {render_pixel_banner_line(line, BOOM_COLORS)}")
         print()
         print(f"    {rgb((214, 126, 220), ACCENT, dim=True)}")
         print(f"  {divider}")
